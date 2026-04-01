@@ -1,0 +1,251 @@
+{
+  "doc_name": "nxgen_module_deepdive_m1_m2",
+  "structure": [
+    {
+      "title": "Table of Contents",
+      "node_id": "0000",
+      "summary": "The document outlines the architecture and core components of a system composed of two primary modules: the **State Engine** and the **Agent Orchestrator**.\n\n**Module 1: State Engine** focuses on how system state is managed, processed, and stored. It defines the public API surface (including functions for reading, writing, subscribing, assembling context, and querying history), and describes the internal processing layer components such as schema validation, merge logic, event emission, and context window construction. It also details tenant-specific configuration through schema registries and discovery dimensions. The storage architecture is presented as a tiered model using Redis (hot storage), PostgreSQL (warm storage), and archival storage (cold). Additionally, it provides a full 9-step message processing flow and a complete reference of the state object structure in JSON format.\n\n**Module 2: Agent Orchestrator** explains how agents are defined, triggered, prioritized, and coordinated. It introduces the Agent Manifest system (including supported fields, consumers, and four agent types), the trigger system with conditions and tenant overrides, and priority resolution strategies including tie-breaking rules. It details the Handoff Manager, covering confidence scoring, atomic operations, auto-fill mechanisms, and preservation of contextual dimensions. The module also defines namespace-based state write boundaries and concludes with a summary of key technical decisions underpinning the orchestration design.",
+      "line_num": 14
+    },
+    {
+      "title": "Module 1: State Engine",
+      "node_id": "0001",
+      "prefix_summary": "# Module 1: State Engine\n\n| Module Purpose The State Engine is the central nervous system of the entire platform. It manages session state, tracks discovery progress, accumulates context from every source (user messages, CRM data, agent outputs, background enrichment), broadcasts state changes as events to drive the reactive agent mesh, and assembles optimized context windows for LLM calls. Every other module in the platform reads from or writes to the State Engine. It is not just session management — it is the coordination backbone through which all agents communicate without direct coupling. |\n| --- |",
+      "line_num": 44,
+      "nodes": [
+        {
+          "title": "1.1 API Surface",
+          "node_id": "0002",
+          "prefix_summary": "## 1.1 API Surface\n\nThe State Engine exposes five core API methods. Each serves a distinct purpose and is consumed by different parts of the platform.",
+          "line_num": 49,
+          "nodes": [
+            {
+              "title": "1.1.1 readState(sessionId, scope?)",
+              "node_id": "0003",
+              "summary": "This section describes the `readState(sessionId, scope?)` function, which retrieves the current state of a session with optional scoping to control how much data is returned.\n\nIt explains that the `scope` parameter determines which portion (or “layer”) of the session state is returned:\n\n- **\"full\"** – Returns all layers (Universal, Domain, and Agent-Specific), typically used by the Agent Orchestrator for trigger evaluation.\n- **\"universal\"** – Returns only shared session metadata and basic customer information, used for lightweight status checks and session management.\n- **\"agent:<name>\"** (e.g., `\"agent:cross-sell\"`) – Returns only the specified agent’s sandboxed state, allowing individual agents to access their own prior data.\n- **\"discovery\"** – Returns only discovery progress, dimensions, and scores, mainly for UI components such as progress bars.\n- **\"intent_signals\"** – Returns only intent-related data, used by the Trigger Evaluator for fast condition checks.\n\nThe section emphasizes that returning the full state by default is inefficient. Scoped reads reduce payload size, improve performance, and ensure that each component (UI, agents, orchestrator) retrieves only the data it actually needs.",
+              "line_num": 53
+            },
+            {
+              "title": "1.1.2 writeState(sessionId, patch)",
+              "node_id": "0004",
+              "summary": "This section explains the `writeState(sessionId, patch)` function, which applies partial updates to a session’s state by merging only the specified fields rather than overwriting the entire state. It emphasizes the importance of using patches in environments where multiple processes (such as NLU, background agents, and active agents) update the state concurrently, preventing them from overwriting each other’s changes. The section also provides an example patch showing how intent signals and conversation metadata (e.g., detected competitors, pain points, message count, and timestamp) are updated incrementally after a user message.",
+              "line_num": 67
+            },
+            {
+              "title": "1.1.3 subscribe(sessionId, eventTypes, callback)",
+              "node_id": "0005",
+              "summary": "This section explains the `subscribe(sessionId, eventTypes, callback)` function, which enables modules to register for specific state-change events in order to receive real-time notifications from the State Engine.\n\nInstead of continuously polling for updates, modules declare the events they are interested in. When the State Engine processes a write operation that generates one of those events, it pushes notifications to all relevant subscribers. This event-driven model enables efficient, low-latency, real-time reactivity across the platform.\n\nThe document also outlines how different system components use subscriptions:\n\n- **Agent Orchestrator** listens for intent and workflow-related events to evaluate triggers and manage agent activation or dismissal.\n- **Conversation UI** subscribes to progress and recommendation events to dynamically update the user interface via WebSocket.\n- **Analytics Engine** tracks lifecycle and recommendation events for reporting and learning purposes.\n- **Audit Layer** subscribes to all events to create immutable compliance records with timestamps.\n\nOverall, the section highlights how event subscriptions power coordination, responsiveness, analytics, and compliance within the system.",
+              "line_num": 78
+            },
+            {
+              "title": "1.1.4 assembleContext(sessionId, agentId)",
+              "node_id": "0006",
+              "summary": "This section describes the **assembleContext(sessionId, agentId)** function, which is responsible for constructing an optimized LLM prompt context when an agent is invoked.\n\nThe main focus is on intelligently building a context window tailored to a specific agent, rather than passing the entire application state and conversation history. The function addresses token limit constraints and relevance filtering through a structured five-step process:\n\n1. **Read the agent’s manifest requirements** to determine which state fields, conversation depth, and knowledge base (KB) sources are needed.\n2. **Pull only relevant state fields** as defined in required and optional fields in the manifest.\n3. **Include limited conversation history**, based on a specified depth, with older messages optionally summarized.\n4. **Retrieve relevant KB context** by querying Foundry IQ using a context-aware query and including top results.\n5. **Apply a token budget**, trimming sections (conversation history, KB results, customer profile) if necessary to stay within limits.\n\nThe document also outlines a **fixed token budget allocation strategy per agent**, with defined limits for sections such as system prompt, customer context, conversation history, KB results, product graph, and discovery progress. For the MVP, fixed allocation budgets are used for predictability and easier debugging, with unused tokens redistributed primarily to conversation history and KB results. More advanced relevance-based allocation is deferred for future iterations once real usage data is available.",
+              "line_num": 91
+            },
+            {
+              "title": "1.1.5 queryHistory(sessionId, filters)",
+              "node_id": "0007",
+              "summary": "This section describes the `queryHistory(sessionId, filters)` function, which returns a chronological changelog of state changes within a single session. It records what field changed, when it changed, the previous and new values, and who initiated the change. The feature supports debugging (tracing decision logic), session replay (understanding conversation flow), auditing (tracking data usage for compliance), and analytics (analyzing session progression patterns).\n\nThe document also outlines a design decision to store history in a PostgreSQL `state_changelog` table with fields such as `session_id`, `timestamp`, `field_changed`, `old_value`, `new_value`, and `source`. The rationale is that simple relational storage is sufficient for MVP needs, avoiding the complexity of event sourcing while still supporting debugging, replay, audit, and analytics use cases.",
+              "line_num": 115
+            }
+          ]
+        },
+        {
+          "title": "1.2 Processing Layer",
+          "node_id": "0008",
+          "prefix_summary": "## 1.2 Processing Layer\n\nThe processing layer sits between the API surface and the storage layer. Every writeState call passes through four processing stages: Schema Validation, Merge Engine, Persist, and Event Emission.",
+          "line_num": 132,
+          "nodes": [
+            {
+              "title": "1.2.1 Schema Validator",
+              "node_id": "0009",
+              "summary": "The section describes the **Schema Validator**, which ensures that every write to the system state conforms to a defined structure specific to each tenant. Validation operates across three layers:\n\n1. **Universal Layer** – Platform-defined, hardcoded fields required for all tenants (e.g., session ID as UUID, status values restricted to active/suspended/closed, ISO 8601 timestamps).\n\n2. **Domain Layer** – Tenant-specific schema definitions configured during onboarding. These define structures and constraints for business data such as customer profiles, product categories, purchase history, and other domain-specific attributes. Rules, required fields, and allowed values vary completely by tenant.\n\n3. **Agent Layer** – Each agent has a predefined state structure declared in its manifest. For example, a Cross-Sell agent must output a recommendations array and a confidence_score between 0 and 1.\n\nEvery state write undergoes four types of validation:\n- **Type validation** (correct data types),\n- **Required field validation** (presence of mandatory fields),\n- **Value constraint validation** (bounds or allowed values),\n- **Structural validation** (correct object/array shapes and nested fields).\n\nThe document concludes with a design decision: schemas will use **standard JSON Schema**, stored per tenant in a `tenant_schemas` PostgreSQL table and validated at runtime using established libraries. This avoids building a custom validation framework and ensures schemas are readable, versionable, and maintainable.",
+              "line_num": 136
+            },
+            {
+              "title": "1.2.2 Merge Engine and Conflict Resolution",
+              "node_id": "0010",
+              "summary": "This section explains how the system safely merges incoming state updates and resolves write conflicts.\n\nIt describes a **Merge Engine** that performs a deep merge when a `writeState` patch arrives. Instead of overwriting the entire state, the engine overlays the patch onto the existing state tree, updating or adding only the specified fields while leaving all other data unchanged. This ensures partial updates do not corrupt unrelated state.\n\nTo handle rare simultaneous writes to the same field, the system uses **optimistic locking with a version number**. Each state row includes a version field:\n\n- A process reads the current state and version.\n- It computes the updated value.\n- It attempts to write the change using a conditional SQL update (`WHERE version = X`).\n- If the version matches, the write succeeds and the version increments.\n- If another process has already updated the row (changing the version), the write fails, and the process must re-read, recompute, and retry.\n\nThe documented decision is to use optimistic locking with a simple version check in the SQL `UPDATE` statement. The rationale is that, for an MVP with mostly sequential agent execution, conflicts are rare, and this lightweight approach avoids the complexity of distributed locks or CRDTs while requiring minimal implementation effort.",
+              "line_num": 161
+            },
+            {
+              "title": "1.2.3 Event Emitter",
+              "node_id": "0011",
+              "summary": "This section describes the **Event Emitter** component of the system’s State Engine and its role in enabling a reactive, state-driven agent architecture.\n\nIt explains that after every successful state update, the system compares the new state patch with the previous state and emits events based on detected changes. This mechanism acts as the platform’s “reactive nervous system,” allowing agents to respond dynamically to state transitions.\n\nThe document outlines specific event mapping rules, including:\n\n- Emitting `intent_signal_detected` when intent signals (e.g., `competitor_mentioned`, `pain_point_detected`) change to true.\n- Emitting `discovery_progress_updated` when `discovery.progress` changes.\n- Emitting `workflow_switched` when `session.active_workflow` changes.\n- Emitting `recommendation_generated` when the number of agent recommendations increases.\n\nIt also defines the event transport strategy:\n- For the MVP, an in-process Python publish/subscribe (pub/sub) pattern using a callback dictionary is used for speed and simplicity.\n- For multi-server production deployments, Redis Pub/Sub is chosen to enable cross-server event distribution with minimal architectural changes.\n\nThe key design decision is that the subscriber interface remains consistent, while only the underlying transport mechanism changes during scaling.",
+              "line_num": 180
+            },
+            {
+              "title": "1.2.4 Context Window Builder",
+              "node_id": "0012",
+              "summary": "### 1.2.4 Context Window Builder\n\nResponsible for assembling optimized LLM prompt contexts when agents are called. This is detailed in section 1.1.4 (assembleContext). The key technical detail: no LLM is used for context assembly in MVP. It is entirely deterministic code: read manifest requirements, pull state fields, pull conversation history (last N messages), query Foundry IQ for KB results, apply token budget via fixed section allocations.",
+              "line_num": 192
+            }
+          ]
+        },
+        {
+          "title": "1.3 Tenant Configuration Layer",
+          "node_id": "0013",
+          "prefix_summary": "## 1.3 Tenant Configuration Layer",
+          "line_num": 196,
+          "nodes": [
+            {
+              "title": "1.3.1 Schema Registry",
+              "node_id": "0014",
+              "summary": "This section describes the **Schema Registry**, a PostgreSQL table that stores the JSON Schema definitions for each tenant’s domain-specific state fields. It serves as the single source of truth for defining what data structure and fields are allowed for each tenant.\n\nThe document explains that the Schema Registry enables multiple system components to function correctly:  \n- The **Schema Validator** uses it to validate tenant data.  \n- The **Admin Portal** relies on it to display tenant-specific configuration options.  \n- The **Context Assembler** uses it to understand which customer profile fields exist for a given tenant.  \n\nAn example `tenant_schemas` table structure is shown, including tenant ID, layer, and a `schema_json` field containing JSON Schema definitions for objects like `customer.profile` and `customer.products`, with required fields, types, enums, and constraints.\n\nFor the MVP, schemas are manually created during tenant onboarding. In the full product version, the Admin Portal will allow tenant administrators to manage domain fields through a UI that automatically generates the corresponding JSON Schema.",
+              "line_num": 198
+            },
+            {
+              "title": "1.3.2 Discovery Dimensions (Tenant-Specific Progress Model)",
+              "node_id": "0015",
+              "summary": "This section explains the **Discovery Dimensions** framework, a tenant-specific progress model that defines what “discovery” means for each business. Discovery dimensions represent the key pieces of information an AI agent must gather before generating high-quality recommendations. These dimensions vary by industry and by agent type.\n\nThe document outlines three core functions of discovery dimensions:\n\n1. **Guide the adaptive question engine** – The AI determines what to ask next based on which unfilled dimension carries the highest weight.\n2. **Gate recommendations** – The agent cannot provide recommendations until a predefined discovery completion threshold is reached, ensuring suggestions are not premature.\n3. **Track progress visually** – A progress bar reflects completion using a weighted calculation across all dimensions.\n\nAn example compares how a Cross-Sell agent’s discovery dimensions differ between an IT Reseller and an Insurance Brokerage. While both use weighted dimensions and CRM auto-fill where applicable, the actual dimensions (e.g., adjacent needs vs. life events, budget timing vs. coverage gaps) and recommendation thresholds differ by industry.\n\nEach discovery dimension includes:\n- A unique ID  \n- Human-readable label  \n- Weight (summing to 1.0 across all dimensions)  \n- Status (empty, partial, complete)  \n- Source of completion (data import, conversation, auto-fill)  \n- Optional suggested questions  \n\nProgress is calculated as a weighted sum: complete dimensions contribute full weight, partial contribute half weight, and empty contribute zero.",
+              "line_num": 209
+            }
+          ]
+        },
+        {
+          "title": "1.4 Storage Layer",
+          "node_id": "0016",
+          "prefix_summary": "## 1.4 Storage Layer",
+          "line_num": 235,
+          "nodes": [
+            {
+              "title": "1.4.1 Redis Cache (Hot Storage)",
+              "node_id": "0017",
+              "summary": "This section describes the use of Redis as a hot storage layer for active chat sessions.\n\nRedis stores the full current state object for each session that is actively open (for example, when a representative has the chat window open). During an active conversation, the session state is read and written multiple times per minute. Each user message triggers several operations—state reads and writes, NLU processing, context assembly, and agent calls—so low latency is critical. Redis provides sub-millisecond response times, avoiding the 5–50 ms latency per query that would occur if PostgreSQL were used for every operation.\n\nThe following data is stored in Redis:\n- The full session state as a JSON string, keyed by `session:{session_id}`, with a 2-hour TTL to automatically evict idle sessions.\n- A subscriber registry, keyed by `session:{session_id}:subscribers`, containing a set of subscriber IDs listening to session events.\n\nThe following data is not stored in Redis:\n- Conversation message history (stored in PostgreSQL due to size).\n- State changelog entries (written directly to PostgreSQL).\n- Closed or expired sessions (removed when the session ends or the TTL expires).",
+              "line_num": 237
+            },
+            {
+              "title": "1.4.2 PostgreSQL (Warm Storage)",
+              "node_id": "0018",
+              "summary": "### 1.4.2 PostgreSQL (Warm Storage)\n\nPostgreSQL is the durable store for ALL session data. Even while a session is active in Redis, every write also goes to PostgreSQL (write-through pattern). Tables:\n\nsessions: Session metadata — id, tenant_id, rep_id, customer_id, status, created_at, ended_at.\n\nsession_state: Full state JSON per session, updated on every write.\n\nconversation_messages: Every message with role, content, timestamp, extracted entities.\n\nstate_changelog: Every state mutation with field_changed, old_value, new_value, source, timestamp.\n\nfeedback_signals: Accept, dismiss, usage events for the Feedback Engine.",
+              "line_num": 249
+            },
+            {
+              "title": "1.4.3 Cold Archive (Full Product Only)",
+              "node_id": "0019",
+              "summary": "### 1.4.3 Cold Archive (Full Product Only)\n\nSessions older than 6-12 months are archived to Azure Blob Storage as compressed JSON. Summary records remain in PostgreSQL for long-term analytics. For MVP, only Redis + PostgreSQL are needed. Cold archival is a full-product concern when data volume warrants it.",
+              "line_num": 263
+            }
+          ]
+        },
+        {
+          "title": "1.5 Exact Message Processing Flow",
+          "node_id": "0020",
+          "summary": "This section explains the complete, step‑by‑step message processing flow within the State Engine when a sales rep sends a message. It emphasizes that the pipeline is almost entirely deterministic, with only one LLM call used for focused NLU extraction.\n\nKey points covered:\n\n- **LLM Usage Constraint:** The pipeline uses no LLMs except for a single, fast NLU extraction call (GPT-4o-mini). All other steps—validation, merging, persistence, and event handling—are deterministic to ensure speed and predictability.\n\n- **End-to-End Message Flow (Steps 0–9):**\n  1. **Message Reception:** The UI sends the message via WebSocket.\n  2. **Session Validation:** Backend verifies session validity, authorization, activity status, and content safety (Azure Content Safety API). No LLM involved.\n  3. **NLU Extraction (Only LLM Call):** Extracts structured data such as pain points, competitors, products, budget, timeline, and decision-maker signals, returning structured JSON.\n  4. **Patch Construction:** Builds a state patch from extracted data, updates intent signals, discovery metrics, and message counts.\n  5. **Patch Validation:** Validates the patch against a tenant-specific schema (type checks, constraints).\n  6. **State Merge:** Deep merges the patch into Redis with optimistic locking and version incrementing.\n  7. **Persistence:** Writes updated state and related records to PostgreSQL in parallel with Redis.\n  8. **Event Broadcasting:** Emits domain events (e.g., intent signals, discovery progress updates) based on detected changes.\n  9. **Subscriber Reactions:** Orchestrator and UI respond to emitted events (e.g., surfacing plugins, updating progress bars).\n  10. **Conditional Context Assembly:** If needed, assembles optimized LLM context for downstream agent calls.\n\nOverall, the section highlights a controlled, event-driven architecture where structured extraction feeds a deterministic state engine, ensuring reliable state updates and reactive system behavior with minimal AI dependency.",
+          "line_num": 267
+        },
+        {
+          "title": "1.6 Complete State Object Shape",
+          "node_id": "0021",
+          "summary": "The partial document defines the complete JSON structure of a session state object and explains the architectural design decisions behind it.\n\nIt provides a detailed reference model of the runtime state, organized into clearly separated sections with explicit ownership rules (who writes each field and when). The state object includes:\n\n- **Metadata** managed by the State Engine (e.g., session ID, tenant ID, versioning for optimistic locking, timestamps).\n- **Session information** written by the Orchestrator (e.g., workflow status, active agents, message count).\n- **Customer data** populated by Data Integration and NLU (e.g., profile details, products).\n- **Intent signals** generated by NLU on every message (e.g., competitor mentions, pain points, budget signals).\n- **Discovery progress** maintained by the active agent (e.g., progress percentage, thresholds, dimension tracking).\n- **Agent-specific state**, where each agent writes only within its own namespace to prevent cross-contamination.\n- **UI state** controlled by the Orchestrator (e.g., quick actions, workflow display data).\n- **Conversation data** managed by the State Engine (e.g., last message, message count).\n\nThe document also formalizes a key architectural decision: a **three-layer state schema design** consisting of:\n1. **Universal layer** (platform-wide, fixed schema),\n2. **Domain layer** (tenant-configured, flexible via JSONB),\n3. **Agent-specific layer** (per-agent namespace, also JSONB).\n\nThis design is implemented in PostgreSQL using JSONB columns for flexibility without requiring database migrations. The rationale emphasizes scalability, tenant standardization, architectural consistency, and strict namespace isolation to ensure maintainability and prevent unintended data coupling between agents.",
+          "line_num": 296
+        }
+      ]
+    },
+    {
+      "title": "Module 2: Agent Orchestrator",
+      "node_id": "0022",
+      "prefix_summary": "# Module 2: Agent Orchestrator\n\n| Module Purpose The Agent Orchestrator is the traffic controller of the platform. It decides WHEN agents should activate, WHICH agent takes priority when multiple trigger simultaneously, HOW to handle transitions between core workflow agents, and WHERE to route agent outputs. It contains zero AI — it is entirely deterministic, rule-based logic. The LLMs are only involved when the actual agents execute (Modules 6-12). The Orchestrator is pure traffic control executing in sub-millisecond time. |\n| --- |",
+      "line_num": 306,
+      "nodes": [
+        {
+          "title": "2.1 Agent Manifest System",
+          "node_id": "0023",
+          "prefix_summary": "## 2.1 Agent Manifest System\n\nEvery agent in the platform registers itself via a manifest — a declarative document that tells the Orchestrator everything it needs to know about the agent without the Orchestrator understanding the agent’s internal logic. Think of it as a job application: the agent declares who it is, what it needs, when it should be called, and what it will produce.",
+          "line_num": 311,
+          "nodes": [
+            {
+              "title": "2.1.1 Manifest Fields and Who Consumes Them",
+              "node_id": "0024",
+              "summary": "This section explains the key fields within an agent manifest and identifies which system components consume each field. It outlines how identity fields (agentId, name, type) are used by the Agent Registry, how triggers are evaluated to determine when an agent activates, and how stateNeeds defines the specific data, conversation history depth, and knowledge base context required for assembling the agent’s LLM input. It also describes how stateOutputs controls where and how an agent can write to shared state, including namespace restrictions and merge strategies enforced by validation and merge components. Additionally, it covers execution coordination fields such as defaultPriority for ordering agents, isCore for managing exclusive core workflows, and discoveryConfig for handling initialization, weighting, thresholds, and auto-fill behavior during activation and handoff.",
+              "line_num": 315
+            },
+            {
+              "title": "2.1.2 The Four Agent Types",
+              "node_id": "0025",
+              "summary": "The document section explains the four agent types in the system and how each differs in execution behavior, orchestration, visibility, and context usage:\n\n- **CORE_WORKFLOW** agents have exclusive execution, meaning only one can be active at a time. They control the main conversation flow, receive full context, and respond directly in the chat. If another core agent is triggered, a handoff evaluation occurs.\n\n- **PLUGIN_QUICK_ACTION** agents use lazy execution. They appear as UI buttons when triggered but only run when explicitly clicked by the user. Their results are displayed in panels or cards (not the main chat), use a smaller context, and disappear when trigger conditions are no longer met.\n\n- **BACKGROUND_ENRICHMENT** agents execute silently and immediately without user visibility. They write results to system state for other agents to use, typically require minimal context, and follow a fire-and-forget pattern.\n\n- **REACTIVE_SUGGESTION** agents proactively display suggestion cards based on detected signals. Users can accept (triggering a handoff) or dismiss them. Unlike plugins, these are system-initiated suggestions rather than user-invoked tools.\n\nOverall, the section defines how the orchestrator routes and manages agents based on execution style, user interaction model, and context requirements.",
+              "line_num": 330
+            }
+          ]
+        },
+        {
+          "title": "2.2 Trigger System",
+          "node_id": "0026",
+          "prefix_summary": "## 2.2 Trigger System",
+          "line_num": 342,
+          "nodes": [
+            {
+              "title": "2.2.1 Trigger Conditions Deep Dive",
+              "node_id": "0027",
+              "summary": "This section explains how trigger conditions work within a manifest and how they power the reactive agent mesh.\n\nIt describes the structure of a trigger block, which includes:\n- **conditions** – the specific rules to evaluate.\n- **conditionType** – defines the evaluation logic.\n- **combineWith** – determines how multiple conditions within the block are combined.\n\nThe different **conditionType** values are outlined:\n- **state_match** – evaluates conditions against current state values (most common).\n- **always** – triggers unconditionally, typically for always-available plugins.\n- **event_match** – triggers based on specific state change events rather than static state, useful for one-time or threshold-crossing scenarios.\n- **composite** – combines both state-based and event-based logic for more complex triggering.\n\nThe section also explains logical combination rules:\n- Within a single trigger block, **combineWith** controls whether conditions use **AND** (all must be true) or **OR** (any can be true).\n- Between multiple trigger blocks in the `triggers` array, the relationship is always **OR**, meaning any satisfied block activates the agent.\n\nOverall, the section clarifies how trigger logic is structured and evaluated to enable flexible, event-driven agent behavior.",
+              "line_num": 344
+            },
+            {
+              "title": "2.2.2 Complete Operator Reference",
+              "node_id": "0028",
+              "summary": "This section provides a comprehensive reference for all supported operators that can be used in conditional logic. It explains how each operator evaluates a state field’s value, detailing its meaning, compatible data types, and practical examples.\n\nThe document covers:\n\n- **Equality operators** (`equals`, `not_equals`) for exact comparisons across strings, numbers, booleans, and null values.  \n- **Numeric comparison operators** (`gt`, `gte`, `lt`, `lte`) for evaluating numerical thresholds.  \n- **Array length operators** (`length_gte`, `length_equals`) for validating the size of arrays.  \n- **Containment operators** (`contains`, `not_contains`) for checking substrings in text or elements within arrays.  \n- **Existence operators** (`exists`, `not_exists`) to determine whether a field is set or missing.  \n- **Set membership operators** (`in`, `not_in`) for validating whether a value belongs to a predefined list.  \n- **Pattern matching operator** (`regex_match`) for advanced string evaluation using regular expressions.\n\nOverall, the section defines the available comparison functions, their applicable data types, and example use cases to guide implementation in rule-based condition systems.",
+              "line_num": 366
+            },
+            {
+              "title": "2.2.3 Tenant Trigger Overrides",
+              "node_id": "0029",
+              "summary": "### 2.2.3 Tenant Trigger Overrides\n\nEvery agent has default trigger conditions defined in its manifest. Tenant overrides allow modification of these defaults without changing agent code. Three override types exist:\n\ndisable: Completely turns off an agent for this tenant. Example: Insurance brokerage disables Competitor Card because regulations prevent showing carrier comparisons.\n\nreplace_trigger: Replaces the agent’s default trigger with entirely new conditions. Example: SaaS company replaces Cross-Sell’s auto-activate trigger with one that requires 5+ messages first, so reps can build rapport before the agent activates.\n\nadd_trigger: Adds additional conditions that must ALSO be met (AND logic with the default). Example: Medical distributor adds \"customer annual spend must be >= $100K\" to the Upsell agent’s trigger, restricting upsell to high-value accounts.\n\nFor MVP: Overrides are hardcoded JSON per tenant, set during onboarding. For full product: configurable in the Admin Portal.",
+              "line_num": 386
+            }
+          ]
+        },
+        {
+          "title": "2.3 Priority Resolution",
+          "node_id": "0030",
+          "summary": "This section explains how the system resolves conflicts when multiple agents are triggered at the same time. It introduces a **Priority Resolver** that determines execution order through a structured, deterministic cascade.\n\nFirst, agents are separated by type: core workflows compete for a single active slot, plugins are all surfaced but ordered by priority, and background agents execute silently. Resolution among competing agents follows several tiebreakers:\n\n1. **Priority level** (CRITICAL > HIGH > MEDIUM > LOW > BACKGROUND).\n2. **Trigger specificity** (the agent matching more trigger conditions wins).\n3. **Signal strength** (the agent activated by more intent signals wins).\n4. **Hardcoded preference order** (a configurable ranking such as Full Solution > Upsell > Cross-Sell > Renewal > Win-Back > Net-New).\n\nThe document emphasizes that multiple agents can share the same priority and that priority is not unique. The cascade ensures consistent, deterministic outcomes even in ties.\n\nImportantly, losing core agents are not discarded; they are surfaced as reactive suggestions, allowing users to manually switch if desired.",
+          "line_num": 398
+        },
+        {
+          "title": "2.4 Handoff Manager",
+          "node_id": "0031",
+          "prefix_summary": "## 2.4 Handoff Manager\n\nThe Handoff Manager handles transitions between core workflow agents. This is fundamentally different from simple activation because it involves suspending one agent, transferring context, switching discovery dimensions, and enabling future resume.",
+          "line_num": 418,
+          "nodes": [
+            {
+              "title": "2.4.1 Handoff Confidence Scoring",
+              "node_id": "0032",
+              "summary": "This section describes the **Handoff Confidence Scoring** system, which determines whether the system should switch from one active core agent to another when a new agent is triggered during a conversation.\n\nIt defines three confidence-based actions:\n\n- **≥ 0.8 (Auto-switch):** Immediately suspend the current agent and activate the new one when there are strong signals that the conversation has clearly shifted.\n- **0.5–0.79 (Suggest):** Present a suggestion to the rep, allowing them to decide whether to switch workflows when signals are moderate or ambiguous.\n- **< 0.5 (Ignore):** Log the signal but continue with the current agent to avoid unnecessary disruption when signals are weak.\n\nThe confidence score is calculated using three weighted factors:\n- **Signal count:** More intent signals pointing to the new agent increase confidence.\n- **Discovery depth:** Early-stage workflows are easier to switch from (boosting confidence), while late-stage workflows reduce confidence to prevent disruption.\n- **Keyword match:** Use of explicit keywords strongly associated with the new agent increases confidence.\n\nAdditionally, manual workflow switches by the rep automatically set confidence to 1.0, triggering an immediate switch regardless of other factors.",
+              "line_num": 422
+            },
+            {
+              "title": "2.4.2 The Five Atomic Handoff Operations",
+              "node_id": "0033",
+              "summary": "This section describes the five atomic operations that occur during an agent handoff, emphasizing that the entire process is transactional and rolled back if any step fails.\n\n1. **Suspend Current Agent** – The current agent’s full state is preserved in its namespace. It is marked as suspended with timestamps and status updates, and its active discovery dimensions are saved under a dedicated `_suspended_discovery` field to enable accurate future resumption.\n\n2. **Transfer Context** – Key findings and intelligence gathered by the suspended agent are copied into the `inherited_context` of the new agent, ensuring continuity and preventing loss of insights.\n\n3. **Switch Discovery Dimensions** – The new agent’s discovery dimensions are initialized in the top-level discovery object using its predefined configuration. Data can be auto-filled from the existing system state, including findings from the suspended agent, while the previous agent’s dimensions remain stored separately.\n\n4. **Activate New Agent** – The system updates `session.active_workflow` to the new agent, logs the transition in `workflow_history`, and launches the new agent with the assembled context.\n\n5. **Update UI** – The user interface reflects the change by updating workflow indicators, discovery progress, available actions, and presenting an option to resume the previously suspended agent.\n\nOverall, the section outlines a structured, state-safe mechanism for transitioning between agents while preserving context, maintaining discovery continuity, and synchronizing system and UI state.",
+              "line_num": 442
+            },
+            {
+              "title": "2.4.3 Discovery Dimension Auto-Fill During Handoff",
+              "node_id": "0034",
+              "summary": "This section explains how discovery dimensions are automatically populated when a new agent starts, either through a handoff or a fresh activation.\n\nKey points:\n\n- No direct agent-to-agent mapping: Agents do not pass dimension values directly to each other. Instead, each agent independently reads from a shared state object.\n- Self-contained configuration: Each agent defines its own auto-fill logic using a `discoveryConfig.auto_fill_from` field. This ensures that adding new agents does not require modifying existing ones.\n- Auto-fill structure: Each `auto_fill_from` entry specifies:\n  - `state_path`: The location in the shared state where relevant data can be found.\n  - `transform`: A deterministic function that converts raw state data into the specific format needed for the dimension.\n  - `fills_status`: Whether the auto-filled data marks the dimension as \"complete\" (full weight) or \"partial\" (half weight), depending on confidence and need for confirmation.\n- Multiple sources with priority: A dimension can define multiple auto-fill sources, which are evaluated in order. The first successful match is used.\n- Shared state as integration layer: The system relies on a centralized state object as the common data layer, enabling loose coupling and modular agent design.\n\nOverall, the design promotes modularity, independence between agents, and scalable extensibility through state-driven auto-fill logic.",
+              "line_num": 456
+            },
+            {
+              "title": "2.4.4 Discovery Dimension Preservation",
+              "node_id": "0035",
+              "summary": "### 2.4.4 Discovery Dimension Preservation\n\nWhen discovery dimensions switch during handoff, the previous agent’s dimensions are NOT deleted. They are preserved inside the suspended agent’s state namespace:\n\nThe top-level discovery object always reflects the ACTIVE agent’s dimensions. This is what the UI reads for the progress bar and what the Orchestrator reads for threshold checks.\n\nEach suspended agent’s dimensions live in agent_state.{agentId}._suspended_discovery. When that agent is resumed, the Handoff Manager copies _suspended_discovery back into the top-level discovery object, restoring the agent’s progress exactly where it was suspended.\n\nAdditionally, any intelligence learned during the time the agent was suspended (from the agent that was active in between) gets added as inherited_post_suspension context. The resumed agent benefits from everything that happened while it was dormant.",
+              "line_num": 472
+            }
+          ]
+        },
+        {
+          "title": "2.5 StateOutputs.namespace — Write Boundary Enforcement",
+          "node_id": "0036",
+          "summary": "This section explains how **`stateOutputs.namespace` enforces write boundaries** within the system to ensure safe and controlled state modifications.\n\nEach agent declares a specific namespace that defines exactly which parts of the shared state it is allowed to write to. The **Schema Validator enforces these boundaries**, rejecting any attempt to write outside an agent’s permitted namespace. This prevents bugs, malformed outputs, or misbehaving plugins from corrupting unrelated data such as customer profiles, session metadata, or other agents’ results.\n\nThe document provides a table illustrating write permissions for different components:\n- Agents (e.g., Cross-Sell Agent, Email Generator, Background Enrichment) can write only to their designated `agent_state` namespaces and specific approved sections.\n- Internal components like the Orchestrator and NLU Extraction have limited, clearly defined write scopes.\n- No agent can modify another agent’s namespace.\n- The Orchestrator never directly edits agent state.\n\nIt also explains how **`mergeStrategy` controls how updates are applied**:\n- `deep_merge` incrementally updates or adds fields while preserving existing data (used by core agents building state over time).\n- `replace` overwrites the entire namespace with fresh output (used by standalone-result plugins).\n\nOverall, the section emphasizes namespace isolation and controlled merge behavior as key safeguards for maintaining system integrity and preventing cross-component data corruption.",
+          "line_num": 482
+        },
+        {
+          "title": "2.6 Key Technical Decisions Summary",
+          "node_id": "0037",
+          "summary": "This section summarizes the core architectural decisions behind the Agent Orchestrator design and explains the rationale for each.\n\nFirst, the orchestrator is strictly deterministic and rule-based, with no LLM usage. All trigger evaluation, priority resolution, confidence scoring, and routing logic must be fast, predictable, and sub-millisecond. LLMs are reserved exclusively for the agents themselves, ensuring the platform’s core routing layer remains low-latency and reliable.\n\nSecond, agent registration is manifest-based rather than dynamically discovered at runtime. Each agent declares its triggers, requirements, write targets, and priority in a static manifest. This approach makes the system transparent, inspectable, and easier to debug—especially important when managing 15 or more agents. It avoids the opacity and troubleshooting complexity of runtime capability discovery.\n\nThird, handoffs between agents use a suggestion model at medium confidence levels (0.5–0.8) instead of being automatically enforced. This prevents workflow disruption for users (e.g., sales reps) and keeps them in control, while still surfacing relevant opportunities they might otherwise overlook.\n\nFinally, discovery dimensions rely on auto-filling from shared state paths rather than direct cross-agent dimension mapping. Each agent independently declares where to pull required data from the shared state and applies its own transformation logic. This avoids tight coupling between agents, making the system more modular and scalable. The shared state acts as the integration layer, not inter-agent mappings.",
+          "line_num": 498
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,435 @@
+{
+  "version": "1.0",
+  "docs": [
+    {
+      "doc_id": "nxgen_module_deepdive_m1_m2",
+      "doc_title": "M1, M2 Modules",
+      "doc_type": "technical_spec",
+      "file_path": "/Users/iluko/Documents/Personal Projects/Hybrid Approach/data/uploads/nxgen_module_deepdive_m1_m2_4114f5b1.docx",
+      "tree_path": "/Users/iluko/Documents/Personal Projects/Hybrid Approach/data/doc_trees/nxgen_module_deepdive_m1_m2_tree.json",
+      "doc_summary": "This document provides a detailed technical specification of two core modules in a conversational AI platform: the State Engine and the Agent Orchestrator. It covers the architecture, API surface, processing and storage layers, tenant-specific configuration, and message processing flow of the State Engine, as well as the agent manifest system, trigger and priority resolution mechanisms, handoff management, and namespace enforcement in the Agent Orchestrator. The document emphasizes deterministic, rule-based logic for orchestration and state management, with clear boundaries for agent interaction and extensibility for multi-tenant environments.",
+      "key_topics": [
+        "State Engine architecture",
+        "Agent Orchestrator logic",
+        "Session state management",
+        "Agent manifest and trigger system",
+        "Multi-tenant schema validation",
+        "Storage strategies (Redis, PostgreSQL, archival)",
+        "Agent handoff and priority resolution",
+        "Namespace enforcement and write boundaries"
+      ],
+      "relevance_hints": {
+        "best_for": "This document is best for queries about the internal design, API methods, and operational logic of the State Engine and Agent Orchestrator modules, including how session state is managed, how agents are triggered and orchestrated, and how multi-tenant configuration and storage are handled. It is also highly relevant for questions about agent manifest structure, trigger conditions, handoff processes, and technical decisions regarding state and agent management.",
+        "not_useful_for": "This document does NOT cover the implementation details of individual agents, LLM prompt engineering, user interface design, external API integrations, or modules outside of the State Engine and Agent Orchestrator (such as Feedback Engine, RBAC, or Analytics Engine). It does not provide end-user documentation or deployment instructions.",
+        "key_modules": [
+          "State Engine",
+          "Agent Orchestrator"
+        ]
+      },
+      "top_sections": [
+        {
+          "title": "Module 1: State Engine",
+          "node_ref": "nxgen_module_deepdive_m1_m2::0001",
+          "section_summary": "Describes the State Engine's purpose, API surface, processing and storage layers, tenant configuration, message processing flow, and the structure of the session state object, detailing how state is managed, validated, and persisted across the platform."
+        },
+        {
+          "title": "Module 2: Agent Orchestrator",
+          "node_ref": "nxgen_module_deepdive_m1_m2::0022",
+          "section_summary": "Explains the Agent Orchestrator's role in agent activation, priority resolution, handoff management, and enforcement of state write boundaries, focusing on deterministic, rule-based orchestration and agent lifecycle management."
+        },
+        {
+          "title": "1.1 API Surface",
+          "node_ref": "nxgen_module_deepdive_m1_m2::0002",
+          "section_summary": "Details the five core API methods of the State Engine, including readState, writeState, subscribe, assembleContext, and queryHistory, with explanations of their usage, parameters, and impact on session state."
+        },
+        {
+          "title": "2.1 Agent Manifest System",
+          "node_ref": "nxgen_module_deepdive_m1_m2::0023",
+          "section_summary": "Outlines the structure and consumption of agent manifests, the four agent types, and how manifests drive agent registration, triggering, context assembly, and execution within the orchestrator."
+        },
+        {
+          "title": "2.4 Handoff Manager",
+          "node_ref": "nxgen_module_deepdive_m1_m2::0031",
+          "section_summary": "Describes the mechanisms for agent handoff, including confidence scoring, atomic handoff operations, auto-filling discovery dimensions, and preservation of agent-specific progress during workflow transitions."
+        }
+      ],
+      "related_docs": [],
+      "ingested_at": "2026-03-19T13:20:38.524394"
+    },
+    {
+      "doc_id": "nxgen_module_deepdive_m3",
+      "doc_title": "M3 Module",
+      "doc_type": "technical_spec",
+      "file_path": "/Users/iluko/Documents/Personal Projects/Hybrid Approach/data/uploads/nxgen_module_deepdive_m3_f96907a1.docx",
+      "tree_path": "/Users/iluko/Documents/Personal Projects/Hybrid Approach/data/doc_trees/nxgen_module_deepdive_m3_tree.json",
+      "doc_summary": "This document provides a comprehensive technical specification for Module 3: Knowledge Base Engine, the intelligence layer of a conversational AI platform. It details the architecture, ingestion, processing, classification, indexing, retrieval, and lifecycle management of both unstructured and structured knowledge, including the integration of Azure Foundry IQ and proprietary knowledge stores. The document emphasizes the design and operation of the product relationship graph, multi-source retrieval orchestration, caching strategies, and key technical decisions underpinning the system.",
+      "key_topics": [
+        "Knowledge Base Engine architecture",
+        "Ingestion and classification pipeline",
+        "Foundry IQ integration",
+        "Product relationship graph schema and traversal",
+        "Multi-source retrieval orchestration",
+        "Structured metadata models",
+        "Caching and lifecycle management",
+        "Confidence scoring and decay"
+      ],
+      "relevance_hints": {
+        "best_for": "This document is best for queries about the internal design, data flow, and technical decisions of the Knowledge Base Engine, including ingestion, classification, retrieval, product relationship graph construction, and integration with Foundry IQ. It is highly relevant for understanding how knowledge is processed, stored, and retrieved for agentic use cases, as well as the rationale behind architectural choices and lifecycle management.",
+        "not_useful_for": "This document does NOT cover the implementation details of the State Engine, Agent Orchestrator, user interface design, external API integrations, or modules outside of the Knowledge Base Engine (such as Feedback Engine, RBAC, or Analytics Engine). It does not provide end-user documentation, agent prompt engineering, or deployment instructions.",
+        "key_modules": [
+          "Knowledge Base Engine",
+          "Foundry IQ",
+          "Product Relationship Graph"
+        ]
+      },
+      "top_sections": [
+        {
+          "title": "3.1 Ingestion Layer",
+          "node_ref": "nxgen_module_deepdive_m3::0002",
+          "section_summary": "Describes the fan-out ingestion pipeline, including file upload, deduplication, metadata cataloging, content classification, and integration with Foundry IQ for indexing and parsing. Emphasizes automation, tenant isolation, and supported file types."
+        },
+        {
+          "title": "3.2 Processing Pipeline",
+          "node_ref": "nxgen_module_deepdive_m3::0006",
+          "section_summary": "Covers the content classification process using LLMs, cross-KB intelligence extraction, intelligence routing to various stores, and chunking strategies for both unstructured and structured data."
+        },
+        {
+          "title": "3.3 KB Core — Knowledge Stores",
+          "node_ref": "nxgen_module_deepdive_m3::0010",
+          "section_summary": "Details the architecture of per-tenant knowledge stores, including the unified Foundry IQ semantic search layer and multiple structured PostgreSQL stores for products, relationships, competitors, customer patterns, and playbooks."
+        },
+        {
+          "title": "3.4 Product Relationship Graph",
+          "node_ref": "nxgen_module_deepdive_m3::0013",
+          "section_summary": "Explains the schema, relationship types, graph building strategy, confidence model, and traversal algorithms for the proprietary product relationship graph, which underpins intelligent recommendations."
+        },
+        {
+          "title": "3.5 Retrieval Layer — Multi-Source Query Orchestration",
+          "node_ref": "nxgen_module_deepdive_m3::0019",
+          "section_summary": "Describes the orchestration of parallel queries across multiple knowledge sources, agent-specific source mapping, and query construction strategies to maximize retrieval relevance for agentic tasks."
+        }
+      ],
+      "related_docs": [
+        "nxgen_module_deepdive_m1_m2"
+      ],
+      "ingested_at": "2026-03-19T13:35:03.937307"
+    },
+    {
+      "doc_id": "nxgen_module_deepdive_m4",
+      "doc_title": "M4 Module",
+      "doc_type": "technical_spec",
+      "file_path": "/Users/iluko/Documents/Personal Projects/Hybrid Approach/data/uploads/nxgen_module_deepdive_m4_82c839a2.docx",
+      "tree_path": "/Users/iluko/Documents/Personal Projects/Hybrid Approach/data/doc_trees/nxgen_module_deepdive_m4_tree.json",
+      "doc_summary": "This document provides a detailed technical specification for Module 4: Data Integration Layer of a data platform. It covers the architecture, connector framework, field mapping, data transformation and normalization, sync management, data routing to platform targets, outbound write-back processes, and the complete data pipeline flow. The document also addresses MVP CSV import flows, validation, risks, and key technical decisions for scalable and extensible data integration.",
+      "key_topics": [
+        "Data Integration Layer architecture",
+        "Connector framework and roadmap",
+        "Field mapping and canonical schema",
+        "Data transformation, normalization, and enrichment",
+        "Deduplication and error handling",
+        "Sync management (initial load, incremental sync, scheduling)",
+        "Outbound write-back to CRM",
+        "MVP CSV import flow and validation"
+      ],
+      "relevance_hints": {
+        "best_for": "This document is best for queries about the design, implementation, and technical decisions of the Data Integration Layer, including how data is ingested, mapped, normalized, deduplicated, synchronized, and routed within the platform. It is highly relevant for understanding connector architecture, field mapping, data pipeline flow, error handling, and CSV import processes.",
+        "not_useful_for": "This document does NOT cover the internal logic of the State Engine, Agent Orchestrator, Knowledge Base Engine, user interface design, agent prompt engineering, or modules outside of data integration. It does not provide end-user documentation, deployment instructions, or details on feedback, RBAC, or analytics modules.",
+        "key_modules": [
+          "Data Integration Layer",
+          "Connector Framework",
+          "Field Mapping Engine",
+          "Sync Manager",
+          "Write-Back Service"
+        ]
+      },
+      "top_sections": [
+        {
+          "title": "4.2 Connector Framework",
+          "node_ref": "nxgen_module_deepdive_m4::0003",
+          "section_summary": "Describes the standardized connector architecture for integrating external systems, including connector types, authentication, interface contracts, and credential storage, with a roadmap for future CRM/API integrations."
+        },
+        {
+          "title": "4.3 Field Mapping Engine",
+          "node_ref": "nxgen_module_deepdive_m4::0007",
+          "section_summary": "Explains the field mapping process, canonical schema, and ML-based auto-suggest for mapping source data fields to platform-standard fields, ensuring schema consistency across integrations."
+        },
+        {
+          "title": "4.4 Transform & Normalize",
+          "node_ref": "nxgen_module_deepdive_m4::0011",
+          "section_summary": "Covers data transformation, normalization, deduplication, enrichment, and aggregation processes that standardize and enhance imported data for reliable downstream use."
+        },
+        {
+          "title": "4.5 Sync Manager",
+          "node_ref": "nxgen_module_deepdive_m4::0016",
+          "section_summary": "Details the management of data synchronization, including initial load, incremental sync, scheduling, and error handling with a dead letter queue to ensure robust and reliable data updates."
+        },
+        {
+          "title": "4.10 MVP Implementation — CSV Import Flow",
+          "node_ref": "nxgen_module_deepdive_m4::0030",
+          "section_summary": "Describes the MVP CSV import process, including supported import types, user experience, validation rules, and error handling for simple, reliable data onboarding."
+        }
+      ],
+      "related_docs": [
+        "nxgen_module_deepdive_m1_m2",
+        "nxgen_module_deepdive_m3"
+      ],
+      "ingested_at": "2026-03-19T13:36:09.572930"
+    },
+    {
+      "doc_id": "nxgen_module_deepdive_m5",
+      "doc_title": "M5 Module",
+      "doc_type": "technical_spec",
+      "file_path": "/Users/iluko/Documents/Personal Projects/Hybrid Approach/data/uploads/nxgen_module_deepdive_m5_cd6591ed.docx",
+      "tree_path": "/Users/iluko/Documents/Personal Projects/Hybrid Approach/data/doc_trees/nxgen_module_deepdive_m5_tree.json",
+      "doc_summary": "This document provides a comprehensive technical specification for Module 5, which defines the multi-tenancy and tenant configuration framework for a SaaS platform. It details strategies for tenant isolation, domain research and schema configuration, business rules engine, agent configuration, onboarding flows, and key technical decisions for supporting industry-specific adaptation and secure, flexible tenant management. The document contrasts MVP and full product approaches, emphasizing security, configurability, and operational best practices for onboarding and managing diverse B2B tenants.",
+      "key_topics": [
+        "Multi-tenancy architecture",
+        "Tenant isolation and enforcement",
+        "Domain research and schema configuration",
+        "Business rules engine and rule schema",
+        "Agent configuration and enforcement",
+        "Onboarding flow and industry templates",
+        "Configuration versioning and validation",
+        "Technical decisions for SaaS tenant management"
+      ],
+      "relevance_hints": {
+        "best_for": "This document is best for queries about the design, implementation, and operational logic of multi-tenancy, tenant isolation, configuration management, onboarding processes, and business rules enforcement in a SaaS platform. It is highly relevant for understanding how the platform supports secure, flexible, and industry-specific tenant onboarding and management, including technical decisions and configuration strategies.",
+        "not_useful_for": "This document does NOT cover the internal logic of the State Engine, Agent Orchestrator, Knowledge Base Engine, Data Integration Layer, user interface design outside of configuration UI, agent prompt engineering, or modules unrelated to tenant configuration and onboarding. It does not provide end-user documentation, deployment instructions, or details on feedback, RBAC, or analytics modules.",
+        "key_modules": [
+          "Multi-Tenancy",
+          "Tenant Configuration",
+          "Business Rules Engine",
+          "Agent Configuration",
+          "Onboarding"
+        ]
+      },
+      "top_sections": [
+        {
+          "title": "5.1 Tenant Isolation Layer",
+          "node_ref": "nxgen_module_deepdive_m5::0002",
+          "section_summary": "Describes the strategy and enforcement mechanisms for strict tenant isolation, including row-level security with tenant_id, application middleware, PostgreSQL RLS, and resource-specific isolation methods to prevent cross-tenant data access."
+        },
+        {
+          "title": "5.2 Domain Research — How to Prepare for a New Industry",
+          "node_ref": "nxgen_module_deepdive_m5::0006",
+          "section_summary": "Outlines the framework for researching and documenting industry-specific requirements, including sales motion, product taxonomy, customer segmentation, and schema differences, to enable rapid and accurate tenant onboarding."
+        },
+        {
+          "title": "5.3 Configuration Framework",
+          "node_ref": "nxgen_module_deepdive_m5::0009",
+          "section_summary": "Details the architecture and storage of tenant configuration, including versioned JSONB schemas, caching strategies, and the evolution from manual JSON editing to a visual admin portal for configuration management."
+        },
+        {
+          "title": "5.4 Business Rules Engine",
+          "node_ref": "nxgen_module_deepdive_m5::0012",
+          "section_summary": "Explains the types, schema, enforcement timing, and onboarding process for tenant-specific business rules that guide recommendations, compliance, and sales strategies within the platform."
+        },
+        {
+          "title": "5.7 Onboarding Flow — Complete Deep Dive",
+          "node_ref": "nxgen_module_deepdive_m5::0023",
+          "section_summary": "Provides a detailed, step-by-step onboarding process, specifying required client data, handling of degraded states, and the use of industry templates to accelerate and standardize tenant setup."
+        }
+      ],
+      "related_docs": [
+        "nxgen_module_deepdive_m1_m2",
+        "nxgen_module_deepdive_m3",
+        "nxgen_module_deepdive_m4"
+      ],
+      "ingested_at": "2026-03-19T13:36:43.887547"
+    },
+    {
+      "doc_id": "nxgen_module_deepdive_m6_11_v2",
+      "doc_title": "M6, M11 Modules",
+      "doc_type": "technical_spec",
+      "file_path": "/Users/iluko/Documents/Personal Projects/Hybrid Approach/data/uploads/nxgen_module_deepdive_m6_11_v2_0bc26b05.docx",
+      "tree_path": "/Users/iluko/Documents/Personal Projects/Hybrid Approach/data/doc_trees/nxgen_module_deepdive_m6_11_v2_tree.json",
+      "doc_summary": "This document provides a detailed technical specification for Modules 6–11, which constitute the Core Agent Layer of a conversational AI sales platform. It covers the architecture, context assembly, data sourcing, trigger mechanisms, agent workflows, prompt engineering, business rules enforcement, and feedback-driven prompt evolution for agents handling Cross-Sell, Upsell, Full Solution, Renewal, Win-Back, and Net-New sales motions. The document emphasizes phase-aware output, agent-orchestrator communication, industry-neutral design with domain-specific adaptations, and robust safeguards for recommendation quality and system integrity.",
+      "key_topics": [
+        "Core Agent Layer architecture",
+        "Context assembly and data sourcing",
+        "Agent workflow phases (discovery, recommendation, action)",
+        "Trigger matrix and agent handoff",
+        "Prompt engineering and versioning",
+        "Business rules enforcement",
+        "Feedback-driven prompt evolution",
+        "Agent-orchestrator communication protocol"
+      ],
+      "relevance_hints": {
+        "best_for": "This document is best for queries about the internal logic, workflow, and technical design of sales-focused AI agents (Cross-Sell, Upsell, Full Solution, Renewal, Win-Back, Net-New), including how they assemble context, generate outputs, enforce business rules, and evolve prompts based on feedback. It is highly relevant for understanding agent phase transitions, prompt structure, data dependencies, and the interaction between agents and the orchestrator.",
+        "not_useful_for": "This document does NOT cover the architecture or implementation of the State Engine, Agent Orchestrator, Knowledge Base Engine, Data Integration Layer, or tenant configuration modules. It does not provide end-user documentation, UI design, external API integration details, or deployment instructions.",
+        "key_modules": [
+          "Core Agent Layer",
+          "Prompt Engine",
+          "Business Rules Engine"
+        ]
+      },
+      "top_sections": [
+        {
+          "title": "Modules 6–11: Core Agent Layer",
+          "node_ref": "nxgen_module_deepdive_m6_11_v2::0001",
+          "section_summary": "Describes the overall architecture, responsibilities, and boundaries of the Core Agent Layer, detailing the roles of each agent type, their workflow phases, and the MVP versus post-MVP scope."
+        },
+        {
+          "title": "6.1 Context Assembly — How Each Agent Gets Different Context",
+          "node_ref": "nxgen_module_deepdive_m6_11_v2::0002",
+          "section_summary": "Explains how each agent receives a tailored context package, with a comparative table showing context components, data sources, and token budgets for each agent type."
+        },
+        {
+          "title": "6.5 Conversation Stages and Phase-Aware Output",
+          "node_ref": "nxgen_module_deepdive_m6_11_v2::0010",
+          "section_summary": "Details the three operational phases (discovery, recommendation, action) for agents, including structured output formats and how agent behavior and outputs change by phase."
+        },
+        {
+          "title": "6.7 Prompt Architecture",
+          "node_ref": "nxgen_module_deepdive_m6_11_v2::0020",
+          "section_summary": "Describes the standardized prompt template, how business rules are injected and enforced, and how prompts are adapted for different industries and agent roles."
+        },
+        {
+          "title": "6.8 Prompt Versioning and Evolution",
+          "node_ref": "nxgen_module_deepdive_m6_11_v2::0024",
+          "section_summary": "Covers prompt versioning ownership, schema, and the feedback-driven process for evolving prompts, including policies for manual, semi-automatic, and automatic updates."
+        }
+      ],
+      "related_docs": [
+        "nxgen_module_deepdive_m1_m2",
+        "nxgen_module_deepdive_m3",
+        "nxgen_module_deepdive_m5"
+      ],
+      "ingested_at": "2026-03-19T13:58:29.736400"
+    },
+    {
+      "doc_id": "module12_quickactionsdk",
+      "doc_title": "M12 Module",
+      "doc_type": "technical_spec",
+      "file_path": "/Users/iluko/Documents/Personal Projects/Hybrid Approach/data/uploads/module12_quickactionsdk_bbc494ac.docx",
+      "tree_path": "/Users/iluko/Documents/Personal Projects/Hybrid Approach/data/doc_trees/module12_quickactionsdk_tree.json",
+      "doc_summary": "This document provides a comprehensive technical specification for Module 12: Quick Action Agent SDK — Plugin Framework. It details the architecture, security model, interface contracts, platform APIs, UI rendering templates, built-in plugin specifications, plugin lifecycle, feedback and analytics integration, and an alternative open plugin framework. The document distinguishes between MVP and full product capabilities, covering both built-in and custom plugin development, deployment, and governance within a multi-tenant platform.",
+      "key_topics": [
+        "Plugin SDK architecture and execution model",
+        "Security model and sandboxing",
+        "Agent interface contract and manifest specification",
+        "Platform access APIs (state, KB, LLM, history)",
+        "UI rendering contract and templates",
+        "Built-in quick action plugins",
+        "Plugin lifecycle (development, review, deployment, monitoring)",
+        "Alternative open plugin framework"
+      ],
+      "relevance_hints": {
+        "best_for": "This document is best for queries about the design, implementation, and technical decisions of the Quick Action Agent SDK, including how plugins are built, secured, executed, rendered, and managed within the platform. It is highly relevant for understanding plugin interface contracts, security isolation, platform APIs, UI templates, built-in plugin specifications, and the plugin lifecycle from development to monitoring.",
+        "not_useful_for": "This document does NOT cover the internal logic of the State Engine, Agent Orchestrator, Knowledge Base Engine, Data Integration Layer, or core agent workflows. It does not provide end-user documentation, agent prompt engineering, or details on modules outside of the plugin SDK and quick action framework.",
+        "key_modules": [
+          "Quick Action Agent SDK",
+          "Plugin Gateway",
+          "Orchestrator",
+          "Feedback Engine"
+        ]
+      },
+      "top_sections": [
+        {
+          "title": "12.1 SDK Architecture Overview",
+          "node_ref": "module12_quickactionsdk::0002",
+          "section_summary": "Describes the overall architecture of the Plugin Agent SDK, emphasizing its role as an interface contract and runtime sandbox within the platform, and explains the execution model managed by the Orchestrator and Plugin Gateway."
+        },
+        {
+          "title": "12.2 Security Model — Five Layers of Isolation",
+          "node_ref": "module12_quickactionsdk::0004",
+          "section_summary": "Details the five-layer security model for plugin execution, including sandboxed environments, scoped API access, state write restrictions, output sanitization, and review gates for custom plugins."
+        },
+        {
+          "title": "12.3 Agent Interface Contract",
+          "node_ref": "module12_quickactionsdk::0005",
+          "section_summary": "Defines the agent interface contract, including manifest structure, field reference, the execute() function, and the onFeedback() handler, specifying how plugins declare capabilities, permissions, and handle feedback."
+        },
+        {
+          "title": "12.4 Platform Access APIs",
+          "node_ref": "module12_quickactionsdk::0010",
+          "section_summary": "Explains the APIs available to plugins for reading and writing state, querying the knowledge base, accessing conversation history, and using LLM connectors, with distinctions between MVP and full product capabilities."
+        },
+        {
+          "title": "12.8 Built-In Quick Actions — All 8 Plugins",
+          "node_ref": "module12_quickactionsdk::0023",
+          "section_summary": "Specifies the eight built-in quick action plugins, detailing their triggers, data usage, output formats, LLM involvement, and deployment strategy within the platform."
+        }
+      ],
+      "related_docs": [
+        "nxgen_module_deepdive_m1_m2",
+        "nxgen_module_deepdive_m3",
+        "nxgen_module_deepdive_m6_11_v2"
+      ],
+      "ingested_at": "2026-03-19T13:59:38.447170"
+    },
+    {
+      "doc_id": "modules13_15_interfacelayer",
+      "doc_title": "M13, M15 Module",
+      "doc_type": "technical_spec",
+      "file_path": "/Users/iluko/Documents/Personal Projects/Hybrid Approach/data/uploads/modules13_15_interfacelayer_438ced49.docx",
+      "tree_path": "/Users/iluko/Documents/Personal Projects/Hybrid Approach/data/doc_trees/modules13_15_interfacelayer_tree.json",
+      "doc_summary": "This document provides a comprehensive technical specification for three key interface modules of a sales intelligence platform: Module 13 (Conversation UI), Module 14 (CRM Embedded Widget), and Module 15 (Admin Portal). It details their architecture, UI components, real-time and REST communication protocols, backend integration points, and administrative configuration capabilities. The document also covers shared backend services, cross-module interactions, and the rationale behind major technical decisions.",
+      "key_topics": [
+        "Conversation UI architecture and real-time communication",
+        "CRM widget integration and context detection",
+        "Admin portal configuration and management",
+        "State-driven UI rendering",
+        "Module access maps and backend integration",
+        "User roles and permissions",
+        "Discovery framework and business rules",
+        "Shared backend services (API Gateway, WebSocket, Auth)"
+      ],
+      "relevance_hints": {
+        "best_for": "This document is best for queries about the design, functionality, and integration of the Conversation UI, CRM Widget, and Admin Portal modules, including their UI components, communication protocols, backend module interactions, and administrative configuration. It is highly relevant for understanding how these interface layers connect to backend services, manage state, and support sales workflows.",
+        "not_useful_for": "This document does NOT cover the internal logic or implementation of backend modules such as the State Engine, Agent Orchestrator, Knowledge Base Engine, Data Integration Layer, or the detailed workings of individual agents and plugins. It does not provide end-user training, deployment instructions, or deep dives into prompt engineering or LLM design.",
+        "key_modules": [
+          "Conversation UI",
+          "CRM Widget",
+          "Admin Portal",
+          "State Engine",
+          "Orchestrator",
+          "Knowledge Base Engine",
+          "Data Integration",
+          "Multi-Tenancy",
+          "Plugin SDK",
+          "Feedback Engine",
+          "Auth & Roles",
+          "API Gateway",
+          "Compliance"
+        ]
+      },
+      "top_sections": [
+        {
+          "title": "Module 13: Conversation UI",
+          "node_ref": "modules13_15_interfacelayer::0001",
+          "section_summary": "Describes the architecture, UI layout, real-time WebSocket communication, state-driven rendering, and backend integration of the Conversation UI used by sales reps for customer engagement."
+        },
+        {
+          "title": "Module 14: CRM Embedded Widget",
+          "node_ref": "modules13_15_interfacelayer::0017",
+          "section_summary": "Explains the design, supported CRM platforms, context detection mechanisms, interface adaptations, and backend integration of the CRM Widget that embeds platform intelligence within CRM systems."
+        },
+        {
+          "title": "Module 15: Admin Portal",
+          "node_ref": "modules13_15_interfacelayer::0025",
+          "section_summary": "Details the administrative interface for configuring, managing, and monitoring the platform, including knowledge base management, integration setup, business rules, agent configuration, user management, and analytics."
+        },
+        {
+          "title": "Shared Backend Services",
+          "node_ref": "modules13_15_interfacelayer::0040",
+          "section_summary": "Outlines the shared backend services (Platform API, WebSocket Service, Auth Service) that support all interface modules, including their architecture, security, and integration points."
+        },
+        {
+          "title": "Cross-Module Interaction Summary",
+          "node_ref": "modules13_15_interfacelayer::0044",
+          "section_summary": "Provides a comprehensive mapping of how the three interface modules interact with backend modules, specifying access methods, data flows, and integration boundaries."
+        }
+      ],
+      "related_docs": [
+        "nxgen_module_deepdive_m1_m2",
+        "nxgen_module_deepdive_m3",
+        "nxgen_module_deepdive_m4",
+        "nxgen_module_deepdive_m5",
+        "nxgen_module_deepdive_m6_11_v2",
+        "module12_quickactionsdk"
+      ],
+      "ingested_at": "2026-03-19T14:00:11.726335"
+    }
+  ]
+}

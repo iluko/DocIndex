@@ -1,0 +1,30 @@
+{
+  "nxgen_module_deepdive_m1_m2": {
+    "source_path": "/Users/iluko/Documents/Personal Projects/Hybrid Approach/data/uploads/nxgen_module_deepdive_m1_m2_0d41dbf7.docx",
+    "retrieval_path": "/Users/iluko/Documents/Personal Projects/Hybrid Approach/data/indexes/azure__gpt_5_2_chat/derived_markdown/nxgen_module_deepdive_m1_m2.md"
+  },
+  "nxgen_module_deepdive_m3": {
+    "source_path": "/Users/iluko/Documents/Personal Projects/Hybrid Approach/data/uploads/nxgen_module_deepdive_m3_c8f80c09.docx",
+    "retrieval_path": "/Users/iluko/Documents/Personal Projects/Hybrid Approach/data/indexes/azure__gpt_5_2_chat/derived_markdown/nxgen_module_deepdive_m3.md"
+  },
+  "nxgen_module_deepdive_m4": {
+    "source_path": "/Users/iluko/Documents/Personal Projects/Hybrid Approach/data/uploads/nxgen_module_deepdive_m4_f9b62b16.docx",
+    "retrieval_path": "/Users/iluko/Documents/Personal Projects/Hybrid Approach/data/indexes/azure__gpt_5_2_chat/derived_markdown/nxgen_module_deepdive_m4.md"
+  },
+  "nxgen_module_deepdive_m5": {
+    "source_path": "/Users/iluko/Documents/Personal Projects/Hybrid Approach/data/uploads/nxgen_module_deepdive_m5_d11351d7.docx",
+    "retrieval_path": "/Users/iluko/Documents/Personal Projects/Hybrid Approach/data/indexes/azure__gpt_5_2_chat/derived_markdown/nxgen_module_deepdive_m5.md"
+  },
+  "nxgen_module_deepdive_m6_11_v2": {
+    "source_path": "/Users/iluko/Documents/Personal Projects/Hybrid Approach/data/uploads/nxgen_module_deepdive_m6_11_v2_1f44ed87.docx",
+    "retrieval_path": "/Users/iluko/Documents/Personal Projects/Hybrid Approach/data/indexes/azure__gpt_5_2_chat/derived_markdown/nxgen_module_deepdive_m6_11_v2.md"
+  },
+  "module12_quickactionsdk": {
+    "source_path": "/Users/iluko/Documents/Personal Projects/Hybrid Approach/data/uploads/module12_quickactionsdk_98ad7fc6.docx",
+    "retrieval_path": "/Users/iluko/Documents/Personal Projects/Hybrid Approach/data/indexes/azure__gpt_5_2_chat/derived_markdown/module12_quickactionsdk.md"
+  },
+  "modules13_15_interfacelayer": {
+    "source_path": "/Users/iluko/Documents/Personal Projects/Hybrid Approach/data/uploads/modules13_15_interfacelayer_fc0675f2.docx",
+    "retrieval_path": "/Users/iluko/Documents/Personal Projects/Hybrid Approach/data/indexes/azure__gpt_5_2_chat/derived_markdown/modules13_15_interfacelayer.md"
+  }
+}

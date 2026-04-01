@@ -1,0 +1,4 @@
+{
+  "description": "Optional: describe the key concepts, areas, or entities in your domain and how they relate. The router uses this to widen document selection when a query spans multiple concepts. Leave 'entities' empty if your documents are independent.",
+  "entities": []
+}

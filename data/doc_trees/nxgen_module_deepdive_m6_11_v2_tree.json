@@ -1,0 +1,231 @@
+{
+  "doc_name": "nxgen_module_deepdive_m6_11_v2",
+  "structure": [
+    {
+      "title": "Table of Contents",
+      "node_id": "0000",
+      "summary": "This partial document outlines the architecture and operational details of an agent-based system, focusing on context assembly, data source origins, trigger mechanisms, and conversation stages. It covers agent profile comparisons, prompt design and versioning, research and writing methodologies, communication protocols between agents and orchestrators, and addresses system nuances, risks, and technical decisions. The content emphasizes confidence thresholds, enrichment computation, workflow handoffs, phase-aware outputs, plugin activation, business rules integration, and feedback-driven prompt evolution.",
+      "line_num": 14
+    },
+    {
+      "title": "Modules 6–11: Core Agent Layer",
+      "node_id": "0001",
+      "prefix_summary": "The partial document describes the Core Agent Layer (Modules 6–11) of a platform, which serves as its domain intelligence and is responsible for generating conversation-facing outputs using LLMs. These modules produce discovery questions, product recommendations, talking points, objection handlers, and evidence for sales reps, each tailored to a specific sales motion: Cross-Sell, Upsell, Full Solution, Renewal, Win-Back, and Net-New. The document clarifies architectural boundaries, noting that context assembly, workflow selection, and business rules are managed by earlier modules, while Modules 6–11 focus on reasoning logic, prompt engineering, phase-aware output generation, business rules integration, state updates, and prompt versioning. The MVP scope includes Cross-Sell, Upsell, and Full Solution agents, with Renewal, Win-Back, and Net-New planned for post-MVP, as they require more complex data inputs.",
+      "line_num": 40,
+      "nodes": [
+        {
+          "title": "6.1 Context Assembly — How Each Agent Gets Different Context",
+          "node_id": "0002",
+          "prefix_summary": "This partial document describes the \"Context Assembly\" process in a multi-agent system, detailing how each agent receives a customized context package before execution. The assembly is managed by a function that tailors the context based on each agent’s manifest, which specifies unique state needs. The document provides a comparative table outlining the specific context components for six different agents (Cross-Sell, Upsell, Full Solution, Renewal, Win-Back, Net-New). For each agent, it lists the state fields pulled, the amount of conversation history included, the knowledge base sources queried, the types of product graph edges traversed (with confidence thresholds), and the token budget allocated. The table highlights how context varies by agent role, reflecting differences in information needs, data sources, and processing constraints to optimize each agent’s performance for its specific task.",
+          "line_num": 51,
+          "nodes": [
+            {
+              "title": "6.1.1 Enrichment Data — How It’s Computed and What It Means Per Industry",
+              "node_id": "0003",
+              "summary": "This partial document explains how enrichment data is computed and interpreted across different industries within a customer engagement platform. It details that enrichment fields—such as whitespace percentage, segment benchmark, year-over-year revenue growth, account health score, and months since last purchase—are calculated offline using standardized formulas, regardless of industry. The results are stored and loaded for agents when interacting with customers. The document provides a table showing how each enrichment field is computed and what its values mean in the contexts of IT resellers, insurance, and food distribution. A key point is that while the computation of enrichment data is universal, the interpretation is tailored per industry through tenant-specific prompt modifiers. The document also notes that while the current set of enrichment fields covers most use cases, some industries may require custom fields in future phases.",
+              "line_num": 64
+            }
+          ]
+        },
+        {
+          "title": "6.2 Data Source Origins — Where Every Piece of Context Comes From",
+          "node_id": "0004",
+          "summary": "This partial document section details the origins and flow of data fields used by agents in a sales platform. It systematically maps each key data field to its source (such as CRM imports, enrichment jobs, or real-time conversation extraction), specifies when and how each field is populated (automatic import, batch computation, or manual admin entry), and explains the consequences if a field is missing. The table covers customer profile data, product ownership, lifecycle stage, enrichment metrics (like whitespace percentage, revenue growth, benchmarks, health scores), contract details, intent signals from conversations, discovery dimensions, product relationship graphs, knowledge base content, and account ownership. The section emphasizes that almost all data is populated automatically, minimizing manual input from sales reps, who mainly select accounts and may add unique context not present in the CRM. The document clarifies which fields are critical blockers if missing, fallback mechanisms, and how the system adapts when data is incomplete, ensuring transparency in data provenance and system behavior.",
+          "line_num": 79
+        },
+        {
+          "title": "6.3 Complete Trigger Matrix",
+          "node_id": "0005",
+          "summary": "This partial document section outlines the \"Complete Trigger Matrix\" for agent activation within a workflow system. It distinguishes between cold-start triggers (which activate when no agent is currently active, i.e., active_workflow == null) and mid-conversation triggers (which are managed by a Handoff Manager and do not reset active_workflow to null). The matrix details specific trigger conditions for various agent types (Cross-Sell, Upsell, Full Solution, Renewal, Win-Back, Net-New), including their cold-start triggers, mid-conversation triggers, re-trigger conditions within a session, and edge case triggers. The document emphasizes a key design decision: during agent handoff, active_workflow transitions directly between agents without passing through null, preventing multiple agents from activating simultaneously and ensuring smooth context transfer. The rationale for this approach is to avoid race conditions and maintain session integrity.",
+          "line_num": 103
+        },
+        {
+          "title": "6.4 Discovery Threshold Behavior — Minimum, Not a Switch",
+          "node_id": "0006",
+          "prefix_summary": "## 6.4 Discovery Threshold Behavior — Minimum, Not a Switch\n\n| Core Principle The discovery threshold is a MINIMUM gate, not an automatic switch. Crossing the threshold ENABLES recommendations but does NOT force them. The agent reads the conversation flow and decides whether to lead with recommendations or continue discovery. The rep can always keep discovering past the threshold. |\n| --- |",
+          "line_num": 120,
+          "nodes": [
+            {
+              "title": "6.4.1 What Happens When the Threshold Is Crossed",
+              "node_id": "0007",
+              "summary": "This partial document section explains the process and logic for transitioning an AI agent from \"discovery\" mode to \"recommendation\" mode during a conversation. It outlines the steps that occur when the agent's discovery progress reaches a predefined threshold, including how the agent's prompt instructions change, how the LLM determines whether to continue discovery or begin making recommendations, and how the agent's internal state is updated. The document also describes safeguards to ensure recommendations are only made when appropriate, with the Orchestrator enforcing the correct phase based on actual progress to prevent premature or incorrect recommendations.",
+              "line_num": 125
+            },
+            {
+              "title": "6.4.2 Rep Wants to Keep Discovering Past Threshold",
+              "node_id": "0008",
+              "summary": "### 6.4.2 Rep Wants to Keep Discovering Past Threshold\n\nMVP approach: The agent follows the rep’s lead naturally. If the rep keeps asking questions, the agent keeps answering with discovery output. Recommendations are mentioned as early_signals but not fully generated. No explicit UI control needed — the LLM reads conversational cues.\n\nFull product approach: A UI toggle appears once the threshold is met: ‘Ready for recommendations?’ with options ‘Show recommendations’ and ‘Keep exploring.’ If the rep clicks ‘Keep exploring,’ a state flag is set: agent_state.{agent}.hold_discovery = true. The agent stays in discovery mode. When the rep is ready, they click the toggle or explicitly ask. This gives the rep explicit control.",
+              "line_num": 135
+            },
+            {
+              "title": "6.4.3 Can the Rep Go Back from Recommendation to Discovery?",
+              "node_id": "0009",
+              "summary": "This partial document discusses how an AI agent in a sales or support context should handle transitions between the \"discovery\" and \"recommendation\" phases of a conversation. It explains that if a representative (rep) returns to asking discovery questions after recommendations have been made, the agent should follow their lead and shift back to discovery mode, updating recommendations as new information is gathered. The document emphasizes flexibility in the agent's behavior, avoiding abrupt or robotic transitions. It also outlines a decision logic where a threshold of information enables, but does not force, the agent to present recommendations—leaving control with the rep. In the minimum viable product (MVP), the agent uses conversational cues, while the full product envisions an explicit UI toggle for reps to control when recommendations are surfaced. The rationale is to maintain a natural conversation flow and allow reps to set the pace.",
+              "line_num": 141
+            }
+          ]
+        },
+        {
+          "title": "6.5 Conversation Stages and Phase-Aware Output",
+          "node_id": "0010",
+          "prefix_summary": "## 6.5 Conversation Stages and Phase-Aware Output\n\nEvery agent operates in phases, and its output structure CHANGES based on which phase it is in. The phase is tracked in agent_state.{agent}.phase and progresses: discovery → recommendation → action.",
+          "line_num": 148,
+          "nodes": [
+            {
+              "title": "6.5.1 Phase 1: Discovery Mode",
+              "node_id": "0011",
+              "summary": "This partial document describes \"Phase 1: Discovery Mode\" in a guided sales or support process. In this phase, the agent assists the representative in asking effective questions to gather information, without making any product recommendations. The document outlines a structured output format for agents, including the current phase, chat response, a list of prioritized next questions (with their purpose and type), updates on discovery progress (such as which information dimensions have been partially filled), findings extracted from the conversation with confidence scores, early signals indicating possible product categories (but not full recommendations), optional coaching notes for the representative, and a state patch for updating the system state. The focus is on information gathering and guiding the conversation, not on selling or recommending products at this stage.",
+              "line_num": 152
+            },
+            {
+              "title": "6.5.2 Phase 2: Recommendation Mode",
+              "node_id": "0012",
+              "summary": "The partial document describes \"Phase 2: Recommendation Mode\" in a process where, after a discovery threshold is met, agents provide structured product recommendations. The output includes recommended products with supporting reasoning, confidence scores, revenue potential, and segment benchmarks. It also covers talking points for positioning, preemptive responses to likely objections with evidence types, suggested next actions with urgency and expected outcomes, supporting evidence from various sources, and follow-up questions to further validate or close the recommendation. The structure ensures all agents share a consistent format for delivering recommendations and related information.",
+              "line_num": 159
+            },
+            {
+              "title": "6.5.3 Phase 3: Action Mode",
+              "node_id": "0013",
+              "summary": "This partial document describes \"Phase 3: Action Mode\" of the CORE agent system. It clarifies that Action Mode is a phase within the core agent (such as Cross-Sell), which is entered when a representative accepts a recommendation. It distinguishes between the core agent’s phases and plugins (quick actions), explaining that plugins are managed independently by the Orchestrator and can be triggered during any phase based on specific conditions. The core agent does not control plugin activation. The Orchestrator monitors state changes and surfaces relevant plugins automatically. The document also provides a structured example of the Action Mode output, detailing fields such as accepted recommendations, email context for plugin use, CRM opportunity data for write-back, conversation summary for logging, and state patch information.",
+              "line_num": 166
+            },
+            {
+              "title": "6.5.4 Plugin Activation — Orchestrator-Owned, Phase-Independent",
+              "node_id": "0014",
+              "summary": "This partial document section explains how plugins (such as Email Gen, KB Search, Competitor Card, and Account Overview) are activated within a system. The main points are:\n\n- Plugin activation is managed by the Orchestrator, not by core agents, and is independent of the core agent’s operational phase.\n- Each plugin has its own trigger condition, evaluated on every state change, which determines when it becomes available.\n- A table summarizes each plugin’s trigger condition, the phases during which it can appear, and how (or if) the core agent interacts with it.\n- The core agent’s role is to prepare data that plugins may use, but it does not control plugin activation.\n- Plugins can be surfaced at any point in the workflow if their trigger conditions are met, allowing for dynamic and context-sensitive plugin availability.",
+              "line_num": 174
+            }
+          ]
+        },
+        {
+          "title": "6.6 Individual Agent Profiles — Industry-Neutral with Multi-Domain Examples",
+          "node_id": "0015",
+          "prefix_summary": "## 6.6 Individual Agent Profiles — Industry-Neutral with Multi-Domain Examples\n\n| Why Industry-Neutral Stages Each agent’s conversation stages follow the same PATTERN regardless of industry. The specific questions, product types, and terminology change per tenant via configuration (discovery dimensions, prompt modifiers, terminology map from Module 5). The stage descriptions below use generic language. A multi-industry comparison table follows each agent to show how the same stage looks across domains. |\n| --- |",
+          "line_num": 187,
+          "nodes": [
+            {
+              "title": "6.6.1 Module 6: Cross-Sell Agent",
+              "node_id": "0016",
+              "summary": "This partial document describes the design and workflow of a \"Cross-Sell Agent\" module used in a sales context to identify and recommend additional products or services to customers. The agent leverages customer data, benchmarking against similar customers, and conversational discovery to surface cross-sell opportunities. The document outlines the agent’s behavior across five key stages: Opening, Mid-Discovery, Late Discovery, Recommendation, and Action, detailing what the agent does, the outputs generated, and how edge cases are handled at each stage. It emphasizes adaptive questioning, evidence-based recommendations, and transparent handling of low-confidence suggestions. The document also provides a comparative table showing how the cross-sell process is tailored for three industries—IT reselling, insurance brokerage, and food distribution—illustrating domain-specific discovery questions, early signals, recommendation framing, and objection handling.",
+              "line_num": 192
+            },
+            {
+              "title": "6.6.2 Module 7: Upsell Agent",
+              "node_id": "0017",
+              "summary": "This partial document outlines the design and workflow of \"Module 7: Upsell Agent,\" whose mission is to identify and justify upgrade opportunities for existing customer products or services. The agent operates by traversing upgrade paths in a product graph, comparing current and higher tiers, and building ROI justifications for upgrades. The document details the agent’s actions across four stages: Opening (assessing current usage and satisfaction), Mid-Discovery (probing for growth and pain points), Recommendation (presenting upgrade options with ROI and case studies), and Action (preparing quotes and CRM data). For each stage, the table specifies the agent’s tasks, output focus, and how to handle edge cases such as customers already on the highest tier, requests to downgrade, large price increases, or mixed upgrade/downgrade scenarios.",
+              "line_num": 214
+            },
+            {
+              "title": "6.6.3 Module 8: Full Solution Agent",
+              "node_id": "0018",
+              "summary": "The partial document outlines the role and workflow of the \"Full Solution Agent\" in designing comprehensive, multi-product solutions for customers with specific strategic initiatives. It details a four-stage process: Initiative Capture (understanding the customer’s goals and success criteria), Current State Mapping (identifying gaps between current capabilities and desired outcomes), Blueprint Design (architecting a phased, dependency-aware solution with investment and timeline planning), and Validation & Action (preparing tailored executive summaries and stakeholder-specific proposals). The document emphasizes the agent’s focus on holistic solution design rather than individual product selling, and addresses edge cases such as vague initiatives, greenfield customers, budget constraints, and competing stakeholder priorities.",
+              "line_num": 225
+            },
+            {
+              "title": "6.6.4 Modules 9–11: Renewal, Win-Back, Net-New (Post-MVP)",
+              "node_id": "0019",
+              "summary": "This partial document outlines the design and functionality of three post-MVP sales agent modules: Renewal (M9), Win-Back (M10), and Net-New (M11). Each module is described in terms of its mission, unique discovery dimensions (key information the agent must uncover), unique output elements (specific recommendations or analyses produced), and key edge cases (special scenarios requiring tailored handling). The Renewal module focuses on assessing renewal risk and retention strategies, the Win-Back module addresses re-engaging customers whose spend has declined or who have left, and the Net-New module targets profiling and landing new prospects. The document emphasizes the need for agents to adapt their approach based on customer context, such as handling price negotiations, addressing negative past experiences, or operating with limited information.",
+              "line_num": 236
+            }
+          ]
+        },
+        {
+          "title": "6.7 Prompt Architecture",
+          "node_id": "0020",
+          "prefix_summary": "## 6.7 Prompt Architecture\n\n| Business Rules Engine Cross-Reference The Business Rules Engine is defined and stored in Module 5 (Section 5.4 of the M5 document). Module 5 owns rule types (inclusion, exclusion, bundling, sequencing, conditional, priority override), rule schema (JSON structure with conditions, actions, scoping), enforcement timing, and onboarding sources. What Modules 6–11 own is: (1) HOW rules are formatted into prompts (Section 3 of the prompt template below), and (2) HOW post-processing filters apply rules to agent output after LLM generation. Module 5 stores and defines rules. Modules 6–11 consume and enforce them. |\n| --- |",
+          "line_num": 244,
+          "nodes": [
+            {
+              "title": "6.7.1 Prompt Structure — 9-Section Template",
+              "node_id": "0021",
+              "summary": "This partial document describes a standardized 9-section template used to structure agent prompts in a conversational AI system. Each agent prompt is programmatically assembled per agent and per turn, ensuring consistency and adaptability to the agent’s role, current workflow phase, and tenant-specific configurations. The main points covered include:\n\n1. Agent identity and mission statement.\n2. Phase-specific instructions (discovery, recommendation, action) guiding agent behavior.\n3. Enforcement of business rules sourced from tenant configuration.\n4. Tenant-specific prompt modifiers for additional context or industry guidance.\n5. Specification of required output format, typically as a JSON schema.\n6. Inclusion of customer context, such as profile, products, and enrichment data.\n7. Product graph context detailing relationships and confidence scores.\n8. Retrieval of relevant knowledge base results.\n9. Discovery state tracking, including progress, filled/unfilled dimensions, and findings.\n\nThe template also incorporates recent user messages to maintain conversational continuity. This structure ensures that agent responses are contextually relevant, compliant with business rules, and tailored to the current phase of the customer interaction.",
+              "line_num": 249
+            },
+            {
+              "title": "6.7.2 Business Rules: Dual Enforcement",
+              "node_id": "0022",
+              "summary": "This partial document discusses the dual enforcement of business rules in an AI system. It explains that business rules are enforced at two points: first, through prompt injection where rules are embedded as natural language instructions in the system prompt for the LLM to consider during reasoning; and second, through a post-processing filter (Business Rules Engine) that checks and corrects the LLM’s output to ensure compliance with all rules. The document emphasizes that both enforcement points are necessary—prompt injection allows the LLM to reason about and explain rules, while post-processing ensures any missed or ignored rules are still enforced, providing a robust defense-in-depth approach.",
+              "line_num": 256
+            },
+            {
+              "title": "6.7.3 Domain-Specific Business Rules — How They Affect Prompts Across Industries",
+              "node_id": "0023",
+              "summary": "This partial document discusses how domain-specific business rules influence prompt engineering and agent behavior across various industries. It presents a comparative table outlining four domains—IT Reseller, Insurance Brokerage, Food Distributor, and Industrial Distributor—detailing the types of business rules commonly applied in each, specific example rules, and the resulting impact on agent recommendations and actions. The main points covered include the necessity for agents to enforce industry-specific constraints (such as regulatory compliance, compatibility checks, and dietary restrictions), the prioritization of certain recommendations based on contextual factors (like contract dates or seasonal trends), and the overriding nature of non-negotiable rules (e.g., safety or compliance) over other optimization strategies. The document emphasizes that these rules are injected into prompt logic to ensure agents provide recommendations that are both relevant and compliant with domain requirements.",
+              "line_num": 266
+            }
+          ]
+        },
+        {
+          "title": "6.8 Prompt Versioning and Evolution",
+          "node_id": "0024",
+          "prefix_summary": "## 6.8 Prompt Versioning and Evolution",
+          "line_num": 275,
+          "nodes": [
+            {
+              "title": "6.8.1 Versioning Ownership and Schema",
+              "node_id": "0025",
+              "summary": "### 6.8.1 Versioning Ownership and Schema\n\nPrompt versioning is owned by Modules 6–11. Each agent manages its own prompt template versions.\n\n| CREATE TABLE prompt_versions ( id UUID PRIMARY KEY DEFAULT gen_random_uuid(), agent_id VARCHAR(100) NOT NULL,  -- 'core-cross-sell', etc. version INT NOT NULL, is_active BOOLEAN DEFAULT false, prompt_template JSONB NOT NULL,  -- Full template with all 9 sections change_notes TEXT, performance_metrics JSONB,  -- After eval: acceptance rate, quality created_at TIMESTAMPTZ DEFAULT NOW(), created_by VARCHAR(255),  -- 'manual', 'feedback_engine', 'a_b_test' UNIQUE(agent_id, version) ); -- Rollback: set current version inactive, reactivate previous version |\n| --- |",
+              "line_num": 277
+            },
+            {
+              "title": "6.8.2 Feedback-Driven Evolution",
+              "node_id": "0026",
+              "summary": "This partial document discusses a feedback-driven approach to evolving AI prompts and recommendation systems in a B2B sales tool. It outlines how different types of user feedback (such as high dismiss rates, heavy editing of AI-generated emails, skipped discovery questions, lost deals despite accepted recommendations, and rep overrides of recommendation order) are interpreted and used to improve the system. The table details what each feedback signal means, how it should affect prompt engineering or model training, and distinguishes between processes in the MVP (manual review and tuning) versus the full product (semi-automatic or automatic suggestions, tracking, and collaborative filtering). The document also describes the policy for prompt auto-updates, emphasizing a cautious, phased approach: no auto-updates in MVP, semi-automatic updates with human approval in the full product, and supervised automatic updates with A/B testing in later phases, to balance learning speed with safety and minimize risk of widespread errors.",
+              "line_num": 284
+            }
+          ]
+        },
+        {
+          "title": "6.9 Prompt Research and Writing Guide",
+          "node_id": "0027",
+          "prefix_summary": "## 6.9 Prompt Research and Writing Guide\n\n| Purpose This section provides a practical guide for researching, writing, and testing prompts for each core agent. The goal is to give the engineering team a clear methodology so that prompt creation is systematic rather than ad-hoc. |\n| --- |",
+          "line_num": 297,
+          "nodes": [
+            {
+              "title": "6.9.1 Step-by-Step Process",
+              "node_id": "0028",
+              "summary": "This partial document outlines a structured, step-by-step process for designing and refining prompt templates for AI agents, particularly in customer-facing or sales-related scenarios. The main points covered include: \n\n1. Defining the agent’s core job in a single, evaluable sentence.\n2. Creating 3–5 idealized “golden conversations” that serve as ground truth for prompt evaluation, covering different phases of interaction.\n3. Mapping the specific information required at each conversation turn to ensure the agent’s context assembly pulls the correct data.\n4. Iteratively writing and refining the prompt by comparing outputs to golden conversations and addressing identified gaps, typically over many iterations.\n5. Adding detailed context sections (such as customer data, product information, and knowledge base results) and verifying the agent’s use of this context.\n6. Incorporating business rules and modifiers, testing for rule adherence and handling of conflicting or exclusionary rules.\n7. Conducting adversarial testing with challenging or ambiguous scenarios to identify and address potential failure modes in the agent’s behavior.\n\nThe process emphasizes thorough testing, iterative improvement, and validation against realistic and edge-case scenarios to ensure robust agent performance.",
+              "line_num": 302
+            },
+            {
+              "title": "6.9.2 Testing Framework",
+              "node_id": "0029",
+              "summary": "This partial document outlines a comprehensive testing framework for evaluating AI agents, detailing five main types of tests: Unit Tests, Quality Rubric evaluations, Golden Conversation Replays, Adversarial Tests, and A/B Testing. For each test type, the document specifies what is being tested (e.g., structural correctness, usefulness, robustness to edge cases, and comparative performance), how the tests are conducted (including input methods, scoring criteria, and reviewer involvement), the target metrics for passing (such as structural pass rates, content relevance scores, and acceptance rate improvements), and the recommended frequency or trigger for running each test (e.g., after every prompt change, weekly, or before production deployment). The framework emphasizes automation, rigorous scoring, and continuous evaluation to ensure agent reliability, quality, and improvement over time.",
+              "line_num": 318
+            },
+            {
+              "title": "6.9.3 Recommended Agent Development Order",
+              "node_id": "0030",
+              "summary": "This partial document outlines the recommended development order for a series of sales-focused AI agents, detailing the rationale, estimated prompt engineering effort, and data dependencies for each. The agents are prioritized based on logical complexity, foundational value, and data requirements. The Cross-Sell agent is developed first due to its clear logic and foundational prompt patterns, followed by Upsell (which adapts Cross-Sell logic with tier comparisons), and then Full Solution (which requires complex, multi-product reasoning). Post-MVP agents include Renewal (focused on contract data and churn risk), Win-Back (requiring historical decline analysis), and Net-New (which involves prospect matching with limited data). Each agent’s development depends on specific data enrichments, product catalog completeness, and the availability of \"golden conversations\" for training and validation.",
+              "line_num": 328
+            },
+            {
+              "title": "6.9.4 Prompt Research Sources",
+              "node_id": "0031",
+              "summary": "This partial document outlines key sources of information used to develop effective prompts for sales agents in an AI-driven system. It details various types of research and data—including domain interviews, sales training materials, CRM fields, recorded sales calls, product catalogs, competitor battle cards, and historical deal data—explaining what each source reveals, which agent types benefit, and how to access them during onboarding. The focus is on gathering practical, real-world knowledge to inform prompt instructions, shape agent behavior, and improve sales outcomes.",
+              "line_num": 339
+            }
+          ]
+        },
+        {
+          "title": "6.10 Agent ↔ Orchestrator Communication Protocol",
+          "node_id": "0032",
+          "summary": "This partial document describes the Agent ↔ Orchestrator Communication Protocol, detailing the step-by-step process by which an orchestrator interacts with an agent in an asynchronous execution flow. The main points covered include: retrieving the agent manifest, assembling the execution context, loading tenant-specific configuration and rules, determining the agent’s current operational phase, selecting the appropriate prompt version, constructing the prompt with context and configuration, invoking the language model (LLM), parsing and validating the agent’s structured output, applying business rules and post-processing, validating and enforcing correct phase transitions, updating the system state, and delivering the agent’s response to the user interface via WebSocket. A key principle emphasized is that agents are pure functions: they operate solely on provided context and produce structured outputs without direct access to databases or state, ensuring testability and separation of concerns, with the orchestrator responsible for all I/O, rule enforcement, and state management.",
+          "line_num": 353
+        },
+        {
+          "title": "6.11 Nuances, Risks, and Gaps Filled",
+          "node_id": "0033",
+          "summary": "This partial document outlines several key enhancements and safeguards in an AI-driven recommendation system. It details how phase transitions are validated by an Orchestrator to prevent premature or inappropriate recommendations from the agent, ensuring the Orchestrator has final authority. It describes robust fallback mechanisms for LLM failures, including retries with simpler prompts and pre-written generic questions to maintain conversational flow. The document emphasizes iterative, multi-turn refinement of recommendations based on user feedback, treating the recommendation phase as a loop rather than a one-off event. It explains how agents cooperate indirectly through a shared state mechanism, enabling modularity and decoupling. Confidence scoring for recommendations is described, with a breakdown of contributing factors and a feedback loop for calibration against real-world outcomes. Finally, it discusses the use of tenant-specific prompt modifiers that customize agent behavior without altering core logic, ensuring both flexibility and system integrity.",
+          "line_num": 360
+        },
+        {
+          "title": "6.12 Key Technical Decisions Summary",
+          "node_id": "0034",
+          "summary": "This partial document summarizes key technical decisions for an AI-driven sales agent system. Main points include: adopting a phase-aware output structure with different JSON schemas for each conversation phase; enforcing business rules both in LLM prompts and post-processing for reliability; designing agents as pure functions that only process input context and produce output, with all I/O handled externally; using thresholds as enabling gates rather than automatic triggers for recommendations, preserving rep control; limiting the MVP to three agent types (Cross-Sell, Upsell, Full Solution) to cover most scenarios, with others planned post-MVP; disabling automatic prompt updates in the MVP for safety, with gradual automation in later phases; and prioritizing Cross-Sell prompt development to establish reusable patterns for other agents. Each decision is justified with clear rationale focused on usability, safety, and maintainability.",
+          "line_num": 380
+        }
+      ]
+    }
+  ]
+}

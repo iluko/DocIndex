@@ -1,0 +1,78 @@
+{
+  "version": "1.0",
+  "docs": [
+    {
+      "doc_id": "auth_doc",
+      "doc_title": "SIP Auth Specification",
+      "doc_type": "technical_spec",
+      "file_path": "/tmp/auth_doc.md",
+      "tree_path": "/tmp/auth_doc_tree.json",
+      "doc_summary": "Details SIP authentication architecture, login flows, and token lifecycle behavior.",
+      "key_topics": [
+        "Authentication",
+        "JWT",
+        "Token refresh",
+        "Session management",
+        "Microsoft Entra ID"
+      ],
+      "relevance_hints": {
+        "best_for": "Questions about login, token issuance, token refresh, and auth failure handling.",
+        "not_useful_for": "Does not define CRM sync or analytics reporting flows.",
+        "key_modules": [
+          "Auth",
+          "API Gateway"
+        ]
+      },
+      "top_sections": [
+        {
+          "title": "Authentication Overview",
+          "node_ref": "auth_doc::0001",
+          "section_summary": "Summarizes the platform authentication model."
+        },
+        {
+          "title": "Token Refresh Flow",
+          "node_ref": "auth_doc::0002",
+          "section_summary": "Covers refresh token rotation rules."
+        }
+      ],
+      "related_docs": [
+        "rbac_doc"
+      ],
+      "ingested_at": "2026-03-17T00:00:00"
+    },
+    {
+      "doc_id": "rbac_doc",
+      "doc_title": "SIP RBAC Overview",
+      "doc_type": "technical_spec",
+      "file_path": "/tmp/rbac_doc.md",
+      "tree_path": "/tmp/rbac_doc_tree.json",
+      "doc_summary": "Explains permission resolution, role assignment, and tenant-aware authorization policies.",
+      "key_topics": [
+        "RBAC",
+        "Permissions",
+        "Roles",
+        "Tenant isolation",
+        "Authorization"
+      ],
+      "relevance_hints": {
+        "best_for": "Questions about roles, permission checks, and access control boundaries.",
+        "not_useful_for": "Does not describe the token refresh lifecycle or login UX.",
+        "key_modules": [
+          "RBAC",
+          "Compliance & Audit"
+        ]
+      },
+      "top_sections": [
+        {
+          "title": "Permission Resolution",
+          "node_ref": "rbac_doc::0004",
+          "section_summary": "Explains how permissions are derived."
+        }
+      ],
+      "related_docs": [
+        "auth_doc"
+      ],
+      "ingested_at": "2026-03-17T00:00:00"
+    }
+  ]
+}

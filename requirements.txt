@@ -1,0 +1,15 @@
+# PageIndex (clone separately and install, or install from source)
+# git clone https://github.com/VectifyAI/PageIndex
+# pip install -e ./PageIndex
+
+openai>=1.30.0
+pydantic>=2.0.0
+python-dotenv>=1.0.0
+PyMuPDF>=1.23.0
+tiktoken>=0.7.0
+asyncio
+click>=8.1.0
+rich>=13.0.0
+pytest>=8.0.0
+streamlit>=1.40.0
+python-docx>=1.1.0

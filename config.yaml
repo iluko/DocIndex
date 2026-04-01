@@ -1,0 +1,13 @@
+defaults:
+  provider: azure
+  model: gpt-4o-2024-11-20
+paths:
+  data_dir: data
+  master_tree: data/master_tree.json
+  arch_map: data/arch_map.json
+pageindex:
+  if_add_node_id: "yes"
+  if_add_node_summary: "yes"
+  if_add_doc_description: "no"
+  max_page_num_each_node: 10
+  max_token_num_each_node: 20000

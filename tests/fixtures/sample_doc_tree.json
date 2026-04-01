@@ -1,0 +1,30 @@
+{
+  "title": "SIP Auth Spec",
+  "nodes": [
+    {
+      "node_id": "0001",
+      "title": "Authentication Overview",
+      "summary": "Describes authentication architecture and login flows.",
+      "start_index": 1,
+      "end_index": 120,
+      "nodes": [
+        {
+          "node_id": "0002",
+          "title": "Token Refresh Flow",
+          "summary": "Explains refresh token rotation and expiration handling.",
+          "start_index": 25,
+          "end_index": 80,
+          "nodes": []
+        }
+      ]
+    },
+    {
+      "node_id": "0003",
+      "title": "RBAC Integration",
+      "summary": "Covers authorization checks and permission evaluation.",
+      "start_index": 121,
+      "end_index": 220,
+      "nodes": []
+    }
+  ]
+}

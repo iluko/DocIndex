@@ -1,0 +1,201 @@
+{
+  "doc_name": "nxgen_module_deepdive_m5",
+  "structure": [
+    {
+      "title": "Table of Contents",
+      "node_id": "0000",
+      "summary": "# Table of Contents\n\n5.1  Tenant Isolation Layer — Strategy, enforcement mechanisms, what’s isolated\n\n5.2  Domain Research — Framework for entering new industries, state differences per domain\n\n5.3  Configuration Framework — Architecture, UI strategy, JSON structure, caching\n\n5.4  Business Rules Engine — Rule types, schema, enforcement timing, onboarding sources\n\n5.5  Agent Configuration — Config fields, enforcement points, per-tenant customization\n\n5.6  State Schema Configuration — Three layers, domain field definitions, discovery dimensions\n\n5.7  Onboarding Flow — Day-by-day timeline, exact info required, degraded states, templates\n\n5.8  Nuances, Risks, and Gaps Filled\n\n5.9  Key Technical Decisions Summary",
+      "line_num": 14
+    },
+    {
+      "title": "Module 5: Multi-Tenancy & Tenant Configuration Framework",
+      "node_id": "0001",
+      "prefix_summary": "This partial document outlines Module 5, which focuses on building a multi-tenancy and tenant configuration framework for a SaaS platform. The main points covered include ensuring tenant isolation (data, configuration, intelligence) while sharing a common codebase and infrastructure. The module provides a flexible configuration system that supports tenant-specific schemas, business rules, agent settings, discovery dimensions, and UI branding, enabling adaptation to various B2B industries without code changes. It also manages the tenant onboarding process from initial setup to first value. The document contrasts the MVP approach—manual, engineering-driven onboarding using JSON files and basic role support—with the full product vision, which includes self-serve onboarding, industry templates, a visual configuration UI, advanced role management, territory-based scoping, and configuration versioning and rollback.",
+      "line_num": 34,
+      "nodes": [
+        {
+          "title": "5.1 Tenant Isolation Layer",
+          "node_id": "0002",
+          "prefix_summary": "## 5.1 Tenant Isolation Layer\n\nTenant isolation is non-negotiable. Tenant A must never see Tenant B’s data, rules, KB content, conversations, or intelligence. A security breach in isolation would be catastrophic — a tenant’s customer data, competitive intelligence, and sales strategies exposed to a competitor.",
+          "line_num": 42,
+          "nodes": [
+            {
+              "title": "5.1.1 Isolation Strategy: Row-Level with tenant_id",
+              "node_id": "0003",
+              "summary": "This partial document discusses database isolation strategies for multi-tenant SaaS applications, focusing on the use of row-level isolation with a tenant_id column. It compares three main isolation models: separate databases per tenant, separate schemas per tenant, and row-level isolation. The document outlines the pros and cons of each approach, highlighting that row-level isolation is the chosen strategy due to its simplicity, cost-effectiveness, and ease of deployment, despite the need to carefully enforce tenant_id filtering in all queries to prevent data leaks.",
+              "line_num": 46
+            },
+            {
+              "title": "5.1.2 Enforcement Mechanisms",
+              "node_id": "0004",
+              "summary": "This partial document section discusses enforcement mechanisms for ensuring strict row-level isolation in a multi-tenant application. It emphasizes that tenant_id filtering must always be enforced to prevent data leaks between tenants. The document outlines a three-layer defense strategy:\n\n1. Application Middleware: Middleware extracts tenant_id from the authenticated user’s JWT token and injects it into a request-scoped context, ensuring all database queries automatically include tenant_id without manual intervention.\n2. PostgreSQL Row-Level Security (RLS): RLS policies are applied to all tenanted tables, using a session variable (app.tenant_id) to enforce tenant isolation at the database level, preventing cross-tenant data access even if the application layer fails.\n3. Query Auditing in Staging/Test: Middleware in test environments audits all SQL queries to verify tenant_id conditions are present, failing builds if unscoped queries are detected.\n\nThe document also provides code snippets for setting up PostgreSQL RLS policies and for implementing tenant-aware middleware in a FastAPI application.",
+              "line_num": 56
+            },
+            {
+              "title": "5.1.3 What Is Isolated Per Tenant",
+              "node_id": "0005",
+              "summary": "This partial document section outlines the isolation strategies used for multi-tenant resources in a software system. It details how data and configurations for each tenant are kept separate within shared infrastructure. The table specifies the isolation method for each resource, such as using row-level security with tenant IDs for databases, key prefixes for Redis cache, separate containers in Azure Blob Storage, and tenant-specific configurations and analytics. The main focus is on ensuring data and operational isolation per tenant while leveraging shared backend services.",
+              "line_num": 69
+            }
+          ]
+        },
+        {
+          "title": "5.2 Domain Research — How to Prepare for a New Industry",
+          "node_id": "0006",
+          "prefix_summary": "## 5.2 Domain Research — How to Prepare for a New Industry\n\n| The Core Challenge When a new tenant from a new industry signs up (say, an insurance brokerage after we’ve only served IT resellers), the platform needs industry-specific configuration: what does their state schema look like? What discovery dimensions matter? What business rules exist? What terminology do they use? Much of this knowledge does NOT exist in official documentation — it lives in the heads of experienced salespeople, in tribal knowledge, and in how their CRM is actually structured. This section defines how to systematically extract that knowledge. |\n| --- |",
+          "line_num": 82,
+          "nodes": [
+            {
+              "title": "5.2.1 The Domain Research Framework",
+              "node_id": "0007",
+              "summary": "This partial document outlines the \"Domain Research Framework,\" a structured process used to research and document the sales and operational practices of a new industry before configuring a software tenant. The framework results in an \"Industry Blueprint,\" a reusable guide for future onboarding in the same industry. The document details six research phases: (1) Sales Motion Analysis, which maps how sales are conducted and the typical sales cycle; (2) Product/Catalog Taxonomy, which organizes products and identifies natural groupings and cross-sell paths; (3) Customer Segmentation, which defines how customers are segmented and how this affects sales strategies; (4) Discovery Mapping, which captures the key questions and information needed for effective recommendations; (5) Rules & Constraints, which documents business rules, compliance requirements, and product bundling logic; and (6) Terminology & UX, which standardizes language and workflow integration points. The document emphasizes that the most valuable insights come from interviews with top-performing sales reps, analysis of CRM custom fields, and sales training materials, rather than official product documentation.",
+              "line_num": 87
+            },
+            {
+              "title": "5.2.2 State Schema Differences Per Domain",
+              "node_id": "0008",
+              "summary": "This partial document section explains how the state schema for an agent platform is structured in three layers: Universal, Domain, and Agent-Specific. It focuses on the Domain layer, highlighting that each industry has unique domain-specific fields that capture relevant business context. The document provides a comparative table for Tier 1 industries (IT Value-Added Reseller, Telecom/UCaaS, Insurance Brokerage, Industrial Distributor, Medical Device/Healthcare), listing example domain state fields, discovery dimensions, and key terminology for each. It emphasizes that while universal fields (like company name and revenue) are consistent across industries, domain fields vary to reflect industry-specific needs and processes. The schema uses JSONB in PostgreSQL, allowing flexible addition of new fields without database migrations, supporting rapid adaptation to new industry requirements.",
+              "line_num": 103
+            }
+          ]
+        },
+        {
+          "title": "5.3 Configuration Framework",
+          "node_id": "0009",
+          "prefix_summary": "## 5.3 Configuration Framework\n\nThe configuration framework is the machinery that makes the platform behave differently for each tenant without code changes. Configuration is stored in a tenant_config table as structured JSONB, versioned for rollback, and cached in Redis for fast access during conversations.",
+          "line_num": 117,
+          "nodes": [
+            {
+              "title": "5.3.1 Configuration Architecture",
+              "node_id": "0010",
+              "summary": "This partial document describes the configuration architecture for a multi-tenant system. It outlines the schema for a \"tenant_config\" database table, which stores versioned configuration data for each tenant as structured JSONB fields. The table includes fields for schema definitions, discovery settings, agent configurations, business rules, UI customization, and integration settings. Each configuration is versioned, allowing for rollback by reactivating previous versions. The document also explains that configuration data is loaded and cached at the start of each session, ensuring that ongoing conversations are not affected by mid-session configuration changes; only new sessions use updated configurations.",
+              "line_num": 121
+            },
+            {
+              "title": "5.3.2 Configuration UI Architecture (Full Product)",
+              "node_id": "0011",
+              "summary": "This partial document section outlines the architecture and evolution of the configuration user interface (UI) for a software product. It compares the Minimum Viable Product (MVP) approach—where configuration is managed by engineers editing JSON files during onboarding—with the planned full product, which features a visual Admin Portal for configuration. The document details how various configuration areas (state schema, discovery dimensions, business rules, agent settings, UI & branding, integrations) are set in the MVP versus how they will be managed through the Admin Portal UI, including the specific UI components and where each configuration is stored in the database. It also documents the phased rollout plan for the configuration UI, prioritizing the business rules UI due to its frequent changes and potential to bottleneck engineering resources, followed by agent settings and state schema editor. The rationale for this prioritization is to reduce engineering overhead and improve flexibility for administrators.",
+              "line_num": 128
+            }
+          ]
+        },
+        {
+          "title": "5.4 Business Rules Engine",
+          "node_id": "0012",
+          "prefix_summary": "## 5.4 Business Rules Engine\n\n| What Business Rules Are Business rules are tenant-specific constraints and directives that override or augment agent recommendations. They encode domain expertise that the AI cannot learn from data alone: regulatory constraints (‘never recommend life insurance to minors’), product dependencies (‘firewall always needs a license’), strategic priorities (‘push the new cloud product line this quarter’), and sales best practices (‘always offer installation services with hardware over $10K’). |\n| --- |",
+          "line_num": 144,
+          "nodes": [
+            {
+              "title": "5.4.1 Rule Types",
+              "node_id": "0013",
+              "summary": "The partial document outlines different types of business recommendation rules used across various industries, including IT resellers, insurance, and food distribution. It categorizes rules into six types: Inclusion (always recommend certain products together), Exclusion (never recommend certain products under specific conditions), Bundling (present products as packages), Sequencing (recommend products in a specific order), Conditional (recommendations based on specific criteria), and Priority Override (temporarily prioritize certain products or services). Each rule type is illustrated with examples relevant to the three industries, demonstrating how these rules guide product recommendations, cross-selling, and campaign priorities.",
+              "line_num": 149
+            },
+            {
+              "title": "5.4.2 Rule Schema",
+              "node_id": "0014",
+              "summary": "This partial document describes the schema for defining business rules within a tenant configuration system. It outlines the structure of a rule object, including fields such as rule ID, name, type (e.g., inclusion), activation status, priority, conditions for rule evaluation (using logical operators and field comparisons), and the action to be taken when conditions are met (such as adding a specific product SKU as a bundle). The schema also specifies the scope of the rule (segments, agents, industries), metadata (creator, reason, expiration), and provides an example rule that enforces bundling a firewall license with all firewall product recommendations for compliance reasons.",
+              "line_num": 160
+            },
+            {
+              "title": "5.4.3 When Rules Are Enforced — Execution Timing",
+              "node_id": "0015",
+              "summary": "This partial document section explains the timing and mechanism for enforcing business rules within a recommendation system. It identifies two critical enforcement points: (1) after the agent generates candidate recommendations but before presenting them to the user, where rules like exclusion, inclusion, bundling, and sequencing are applied to filter and adjust the recommendation list; and (2) during context assembly for LLM prompt construction, where active rules are injected as system instructions so the LLM can reason about and explain recommendations in compliance with business policies. The document emphasizes that both enforcement points are necessary for robust rule adherence—catching both LLM oversights and ensuring LLM awareness. Additionally, it provides a code example illustrating how business rules are programmatically applied, including rule prioritization, scope checking, condition evaluation, and execution of various rule actions such as removing, adding, reordering, bundling, and boosting product recommendations.",
+              "line_num": 165
+            },
+            {
+              "title": "5.4.4 How Rules Are Onboarded",
+              "node_id": "0016",
+              "summary": "This partial document section explains the process of onboarding rules into a platform, detailing three main sources: industry template defaults, sales manager interviews, and iterative feedback from platform usage. It describes how industry-specific templates provide initial rule sets, how interviews with sales managers elicit custom rules based on business needs and constraints, and how ongoing user feedback helps refine and suggest new rules. The section also outlines the decision to limit rule complexity for the MVP (Minimum Viable Product) to inclusion, exclusion, and bundling rules, with conditions restricted to product category, customer segment, and deal size, deferring more complex conditional logic to a later phase.",
+              "line_num": 178
+            }
+          ]
+        },
+        {
+          "title": "5.5 Agent Configuration",
+          "node_id": "0017",
+          "prefix_summary": "## 5.5 Agent Configuration\n\nAgent configuration determines which agents are active, how they trigger, and how they behave for each tenant.",
+          "line_num": 191,
+          "nodes": [
+            {
+              "title": "5.5.1 Configuration Fields",
+              "node_id": "0018",
+              "summary": "This partial document section outlines the configuration fields for agents within a system, detailing each field’s purpose, default value, and enforcement location. It covers how agents are enabled or disabled per tenant, the conditions that trigger agent activation, thresholds for surfacing recommendations, limits on recommendation quantity, and minimum confidence requirements. It specifies which LLM model is used, the retrieval effort level for queries, and how tenant-specific prompt modifications and discovery questions are handled. Additionally, it describes how available quick action plugins are configured and displayed in the user interface. The table provides a structured overview to guide agent behavior and customization for different tenants and use cases.",
+              "line_num": 195
+            },
+            {
+              "title": "5.5.2 Enforcement Points",
+              "node_id": "0019",
+              "summary": "This partial document section describes the enforcement points for agent configuration within an orchestrated system. It outlines when and how agent configurations are checked: at session start (loading agent configs and building UI elements), during trigger evaluation (only enabled agents are evaluated), at agent execution (agents read their own runtime parameters), and during context assembly (retrieval effort determines reasoning level). An example agent configuration for an IT Reseller tenant is provided, detailing parameters such as enablement status, thresholds, maximum recommendations, confidence floors, retrieval effort, prompt modifiers, and trigger conditions for different agent types (cross-sell, upsell, renewal, win-back). The document emphasizes how these configurations control agent behavior and system responses at various execution points.",
+              "line_num": 210
+            }
+          ]
+        },
+        {
+          "title": "5.6 State Schema Configuration",
+          "node_id": "0020",
+          "prefix_summary": "## 5.6 State Schema Configuration\n\nThe state schema defines what data is tracked in each conversation session. It has three layers (as designed in Module 1), and Module 5 owns the configuration of the Domain layer:",
+          "line_num": 225,
+          "nodes": [
+            {
+              "title": "5.6.1 The Three Layers",
+              "node_id": "0021",
+              "summary": "This partial document describes a three-layer data model used in a platform, detailing the structure, ownership, content, and configurability of each layer. The \"Universal\" layer is hardcoded by the platform and contains core session and customer information that is consistent across all tenants. The \"Domain\" layer is tenant-configured, allowing customization of industry-specific fields relevant to each tenant’s sales process, and is set up during onboarding. The \"Agent-Specific\" layer is scoped to individual agents, providing sandboxed state for each agent to manage their own sales-related data, with partial configurability influenced by tenant-level settings. The table summarizes how each layer is managed and what kind of data it holds.",
+              "line_num": 229
+            },
+            {
+              "title": "5.6.2 Domain Schema Configuration",
+              "node_id": "0022",
+              "summary": "This partial document describes the configuration of a domain schema for an IT Reseller tenant, detailing how domain fields and discovery dimensions are defined in a JSON format. It explains the attributes for each domain field, such as field name, data type, default value, requirement status, display label, description, data sources, agent usage, and discovery prompts. Example fields include technology stack, contract expirations, and cloud migration status. The document also outlines discovery dimensions, including their names, display labels, weights, associated questions, and which agents benefit from them. It specifies that, in the MVP phase, the engineering team manually creates this schema based on domain research, while in the full product, an admin portal allows visual editing and management of these configurations.",
+              "line_num": 237
+            }
+          ]
+        },
+        {
+          "title": "5.7 Onboarding Flow — Complete Deep Dive",
+          "node_id": "0023",
+          "prefix_summary": "## 5.7 Onboarding Flow — Complete Deep Dive\n\n| The Onboarding Goal ‘Zero to first value in under 2 weeks.’ The tenant should be able to have their first real AI-assisted sales conversation within 10 business days of signing. Everything in the onboarding flow is designed to hit this target while collecting enough configuration to make the platform genuinely useful (not a generic chatbot). |\n| --- |",
+          "line_num": 246,
+          "nodes": [
+            {
+              "title": "5.7.1 Onboarding Timeline — Day by Day",
+              "node_id": "0024",
+              "summary": "This partial document outlines a detailed, day-by-day onboarding timeline for implementing a sales platform with a new client. It specifies the main phases, activities, responsible parties, and deliverables for each day of the onboarding process, spanning from initial kickoff to production handoff. Key points include: conducting a kickoff call and setting expectations; creating the client’s tenant in the platform; collecting and importing client data; performing a domain research interview to capture business rules and terminology; ingesting and configuring knowledge base documents; tuning and validating the platform configuration; setting up user accounts and providing training; running a guided pilot with real users; and finally, handing off the system to production with ongoing support established. Each step details who is involved (implementation team, client admins, sales reps) and the expected outcomes or deliverables, ensuring a structured and collaborative onboarding experience.",
+              "line_num": 251
+            },
+            {
+              "title": "5.7.2 Exact Information Required from Client",
+              "node_id": "0025",
+              "summary": "This partial document outlines the exact information required from a client to successfully implement and operate a platform, detailing each data type, its necessity, required format, purpose, and the consequences if it is missing. The main points covered include:\n\n- A table listing key data inputs such as account/customer lists, product catalogs, transaction history, sales playbooks, case studies, contact lists, business rules, branding assets, and CRM field descriptions.\n- For each data type, the document specifies whether it is required, strongly recommended, recommended, or optional.\n- The required format for each input is described (e.g., CSV, Excel, PDF, interview).\n- The rationale for needing each piece of information is provided, explaining how it feeds into different platform components (e.g., populating engines, enabling recommendations, customizing UI).\n- The impact of missing information is clearly stated, ranging from total platform inoperability (blockers) to degraded or generic functionality, or minimal impact for optional items.\n- The document emphasizes that certain data (like customer lists and product catalogs) are critical for basic platform operation, while others enhance accuracy, customization, or user experience.",
+              "line_num": 266
+            },
+            {
+              "title": "5.7.3 Degraded States — What Works Without Full Data",
+              "node_id": "0026",
+              "summary": "This partial document section discusses how a platform handles situations where tenants do not provide complete data, outlining how the system degrades gracefully and what functionalities remain available or are limited. It presents a table listing various types of missing data (such as transaction history, rep interviews, case studies, contacts, and product catalog details), what features still work under these conditions, what features are impaired or unavailable, and recommended mitigation strategies. The main points include: maintaining transparency with users about limitations, using default templates or industry standards when custom data is missing, collecting user feedback to improve recommendations, prompting users to provide missing data over time, and adapting agent responses to work with available information. The overall focus is on ensuring the platform remains functional and useful even with incomplete data, while encouraging tenants to provide more information to unlock advanced features and improve recommendation quality.",
+              "line_num": 280
+            },
+            {
+              "title": "5.7.4 Industry Templates",
+              "node_id": "0027",
+              "summary": "This partial document section describes the concept and structure of \"Industry Templates\" designed to accelerate onboarding for new customers by providing pre-built, industry-specific configurations. Each template includes components such as domain state fields, discovery dimensions, business rules, terminology maps, agent prompt modifiers, CSV templates, and sample data, all tailored to common patterns and requirements of a given industry. The document outlines how each component is used during onboarding and configuration, emphasizing customization and iterative improvement based on customer input. The initial strategy is to build templates for two industries (starting with IT Reseller and one other), with the goal of expanding to templates for all target industries as more customers are onboarded.",
+              "line_num": 292
+            }
+          ]
+        },
+        {
+          "title": "5.8 Nuances, Risks, and Gaps Filled",
+          "node_id": "0028",
+          "summary": "This partial document outlines key gaps, risks, and nuanced considerations in the configuration management of a multi-tenant software product. It covers:\n\n- Configuration Versioning and Rollback: Each configuration change creates a new version, enabling instant rollback if issues arise. Versioning is manual in MVP and automated in the full product.\n- Configuration Validation: New configurations must pass strict validation checks (field types, valid references, no circular dependencies) before activation, with clear error messages for invalid entries.\n- Tenant Deprovisioning: Complete and auditable removal of tenant data is required for compliance (GDPR/CCPA), including database, storage, and cache deletion, with early implementation of a deletion function.\n- Cross-Tenant Insights (Future): The data model should support future anonymized, opt-in insights across tenants, though this is not part of the MVP.\n- Config Changes and Active Sessions: Configuration changes do not affect ongoing user sessions; new sessions load the updated config to prevent disruption.\n- Multi-Admin Conflict: Simultaneous admin edits can cause conflicts; MVP relies on engineering controls, while the full product will implement optimistic locking and conflict warnings in the Admin Portal.",
+          "line_num": 309
+        },
+        {
+          "title": "5.9 Key Technical Decisions Summary",
+          "node_id": "0029",
+          "summary": "This partial document summarizes key technical decisions for a multi-tenant platform. The main points covered include:\n\n- Using shared database tables with a tenant_id column and PostgreSQL Row-Level Security (RLS) for tenant isolation, rather than separate databases or schemas, to reduce operational overhead and maintain flexibility for future migrations.\n- Storing all tenant configuration data as JSONB in a single table, allowing for flexible, schema-less storage that accommodates diverse and evolving configuration needs across industries.\n- Adopting a white-glove, manual onboarding process for the MVP phase to better understand tenant requirements before investing in a self-serve onboarding UI, with a goal to implement self-serve onboarding by Month 8.\n- Providing industry-specific configuration templates as customizable starting points to accelerate onboarding and avoid the cold start problem, with templates evolving based on onboarding experiences.\n- Caching configuration data per session in Redis to ensure consistency throughout a user session, with updates applied only to new sessions to avoid confusion and complexity.",
+          "line_num": 329
+        }
+      ]
+    }
+  ]
+}
