@@ -1,6 +1,0 @@
-{
-  "provider": "azure",
-  "model": "gpt-4.1",
-  "index_key": "azure__gpt_4_1",
-  "index_dir": "/Users/iluko/Documents/Personal Projects/Hybrid Approach/data/indexes/azure__gpt_4_1"
-}
