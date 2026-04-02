@@ -53,7 +53,7 @@ def test_ingest_document_saves_tree_and_updates_master_tree(
             relevance_hints=RelevanceHints(
                 best_for="Auth questions.",
                 not_useful_for="Analytics questions.",
-                key_modules=["Auth"],
+                key_categories=["Auth"],
             ),
             top_sections=[
                 TopSection(
@@ -115,7 +115,7 @@ def test_ingest_document_with_trace_exposes_internal_mapping(
             relevance_hints=RelevanceHints(
                 best_for="Auth questions.",
                 not_useful_for="Analytics questions.",
-                key_modules=["Auth"],
+                key_categories=["Auth"],
             ),
             top_sections=[
                 TopSection(
@@ -181,7 +181,7 @@ def test_ingest_document_with_trace_emits_progress_events(
             relevance_hints=RelevanceHints(
                 best_for="Auth questions.",
                 not_useful_for="Analytics questions.",
-                key_modules=["Auth"],
+                key_categories=["Auth"],
             ),
             top_sections=[
                 TopSection(
@@ -247,7 +247,7 @@ def test_ingest_docx_converts_to_markdown_before_pageindex(
             relevance_hints=RelevanceHints(
                 best_for="Auth questions.",
                 not_useful_for="Analytics questions.",
-                key_modules=["Auth"],
+                key_categories=["Auth"],
             ),
             top_sections=[
                 TopSection(

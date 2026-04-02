@@ -18,7 +18,10 @@ import threading
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Callable, Iterator
+
+logger = logging.getLogger(__name__)
 
 try:
     import tiktoken
@@ -33,6 +36,24 @@ except ImportError:  # pragma: no cover - optional in some test environments
 
 
 TEXT_FIELD_NAMES = {"node_text", "text"}
+_DOC_ID_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_-]*$")
+
+
+def atomic_write_text(path: Path, content: str) -> None:
+    """Write *content* to *path* atomically.
+
+    Writes to a sibling ``.tmp`` file first, then calls ``os.replace()``
+    (POSIX ``rename(2)``). Readers always see either the old complete file or
+    the new complete file — never a half-written one.  If the write itself
+    fails the temp file is cleaned up and the exception re-raised.
+    """
+    tmp = Path(str(path) + ".tmp")
+    try:
+        tmp.write_text(content, encoding="utf-8")
+        os.replace(tmp, path)
+    except Exception:
+        tmp.unlink(missing_ok=True)
+        raise
 TOKENIZER_FALLBACK_PREFIXES = {
     "gpt-5": "o200k_base",
     "o4": "o200k_base",
@@ -51,6 +72,21 @@ class LLMConfig:
     api_key: str
     base_url: str | None
     default_model: str
+
+
+def validate_doc_id(doc_id: str) -> None:
+    """Raise ValueError if doc_id contains characters unsafe for filesystem paths.
+
+    Only letters, digits, underscores, and hyphens are allowed. The first
+    character must be a letter or digit. This prevents path-traversal attacks
+    (../, absolute paths, null bytes) when doc_id is used to build file paths.
+    """
+    if not _DOC_ID_RE.match(doc_id):
+        raise ValueError(
+            f"Invalid doc_id '{doc_id}'. "
+            "Use only letters, digits, underscores, and hyphens, "
+            "starting with a letter or digit (e.g. 'auth_spec_v2')."
+        )
 
 
 def strip_text_fields(value: Any) -> Any:
@@ -749,13 +785,16 @@ def patch_pageindex_llm_helpers(pageindex_utils_module: Any, *target_modules: An
                     return extract_llm_text(response), "max_output_reached"
                 return extract_llm_text(response), "finished"
             except Exception as exc:  # pragma: no cover - network/runtime behavior
-                print("************* Retrying *************")
-                logging.error("Error: %s", exc)
+                logger.warning(
+                    "PageIndex LLM call attempt %d/%d failed, retrying in 1 s: %s",
+                    attempt + 1, max_retries, exc,
+                )
                 if attempt < max_retries - 1:
                     time.sleep(1)
                 else:
-                    logging.error("Max retries reached for prompt: %s", prompt)
-                    return "", "error"
+                    raise RuntimeError(
+                        f"PageIndex LLM call failed after {max_retries} retries: {exc}"
+                    )
 
     def chatgpt_api(
         model: str,
@@ -777,13 +816,16 @@ def patch_pageindex_llm_helpers(pageindex_utils_module: Any, *target_modules: An
                 )
                 return extract_llm_text(response)
             except Exception as exc:  # pragma: no cover - network/runtime behavior
-                print("************* Retrying *************")
-                logging.error("Error: %s", exc)
+                logger.warning(
+                    "PageIndex LLM call attempt %d/%d failed, retrying in 1 s: %s",
+                    attempt + 1, max_retries, exc,
+                )
                 if attempt < max_retries - 1:
                     time.sleep(1)
                 else:
-                    logging.error("Max retries reached for prompt: %s", prompt)
-                    return "Error"
+                    raise RuntimeError(
+                        f"PageIndex LLM call failed after {max_retries} retries: {exc}"
+                    )
 
     async def chatgpt_api_async(
         model: str,
@@ -804,13 +846,29 @@ def patch_pageindex_llm_helpers(pageindex_utils_module: Any, *target_modules: An
                     )
                     return extract_llm_text(response)
             except Exception as exc:  # pragma: no cover - network/runtime behavior
-                print("************* Retrying *************")
-                logging.error("Error: %s", exc)
+                logger.warning(
+                    "PageIndex LLM call attempt %d/%d failed, retrying in 1 s: %s",
+                    attempt + 1, max_retries, exc,
+                )
                 if attempt < max_retries - 1:
                     await asyncio.sleep(1)
                 else:
-                    logging.error("Max retries reached for prompt: %s", prompt)
-                    return "Error"
+                    raise RuntimeError(
+                        f"PageIndex LLM call failed after {max_retries} retries: {exc}"
+                    )
+
+    _EXPECTED_PAGEINDEX_ATTRS = (
+        "ChatGPT_API_with_finish_reason",
+        "ChatGPT_API",
+        "ChatGPT_API_async",
+    )
+    missing = [a for a in _EXPECTED_PAGEINDEX_ATTRS if not hasattr(pageindex_utils_module, a)]
+    if missing:
+        raise RuntimeError(
+            f"PageIndex interface has changed — expected attributes not found in "
+            f"pageindex.utils: {missing}. "
+            "Update the compatibility patch in utils.py to match the new interface."
+        )
 
     pageindex_utils_module.ChatGPT_API_with_finish_reason = chatgpt_api_with_finish_reason
     pageindex_utils_module.ChatGPT_API = chatgpt_api

@@ -1,13 +1,43 @@
-defaults:
-  provider: azure
-  model: gpt-4o-2024-11-20
-paths:
-  data_dir: data
-  master_tree: data/master_tree.json
-  arch_map: data/arch_map.json
-pageindex:
-  if_add_node_id: "yes"
-  if_add_node_summary: "yes"
-  if_add_doc_description: "no"
-  max_page_num_each_node: 10
-  max_token_num_each_node: 20000
+# ─── Configuration reference ─────────────────────────────────────────────────
+# This file documents the settings that drive the application.
+# No application code reads config.yaml — all runtime settings are controlled
+# by environment variables, typically via a .env file (see .env.example).
+#
+# ── LLM provider ─────────────────────────────────────────────────────────────
+# LLM_PROVIDER            "openai" or "azure" (default: inferred from which keys are set)
+# DEFAULT_MODEL           Model name or Azure deployment (e.g. gpt-4.1, gpt-4o)
+#
+# OpenAI:
+#   OPENAI_API_KEY
+#   OPENAI_MODEL            e.g. gpt-4o-2024-11-20
+#
+# Azure OpenAI:
+#   AZURE_OPENAI_API_KEY
+#   AZURE_OPENAI_ENDPOINT   e.g. https://your-resource.openai.azure.com
+#   AZURE_OPENAI_BASE_URL   (optional; derived from ENDPOINT if omitted)
+#   AZURE_OPENAI_CHAT_DEPLOYMENT
+#
+# PageIndex / ingestion also reads CHATGPT_API_KEY — the app auto-fills it
+# from the Azure key when running in Azure mode.
+#
+# ── Storage backend ───────────────────────────────────────────────────────────
+# STORAGE_BACKEND         "local" (default) or "mongodb"
+#
+# Local storage layout:
+#   data/indexes/{project}/     per-project trees, master tree, metadata
+#   data/uploads/               files uploaded via the Streamlit UI
+#   data/arch_map.json          architecture context (tracked in git)
+#
+# MongoDB (STORAGE_BACKEND=mongodb):
+#   MONGODB_URI             connection string (default: mongodb://localhost:27017)
+#   MONGODB_DATABASE        database name (default: hybrid_approach)
+#
+# ── PageIndex ingestion defaults ──────────────────────────────────────────────
+# These are hard-coded in ingestion/ingest.py and can be overridden by passing
+# pageindex_opts when calling the ingestion API directly.
+#
+#   if_add_node_id:           yes
+#   if_add_node_summary:      yes
+#   if_add_doc_description:   no
+#   max_page_num_each_node:   10
+#   max_token_num_each_node:  20000

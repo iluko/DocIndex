@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field
 
 
 class TopSection(BaseModel):
@@ -18,22 +18,7 @@ class RelevanceHints(BaseModel):
 
     best_for: str
     not_useful_for: str
-    # Domain-agnostic name for relevant concept areas / tags in this document.
-    # Accepts the legacy field name ``key_modules`` from pre-existing JSON so
-    # already-ingested indexes do not need to be rebuilt after the rename.
     key_categories: list[str] = Field(default_factory=list)
-
-    @model_validator(mode="before")
-    @classmethod
-    def _migrate_key_modules(cls, values: dict) -> dict:
-        """Accept the legacy ``key_modules`` key and promote it to ``key_categories``.
-
-        This runs before field assignment so both old on-disk JSON and new
-        ingestion paths work without any data migration step.
-        """
-        if isinstance(values, dict) and "key_modules" in values and "key_categories" not in values:
-            values["key_categories"] = values.pop("key_modules")
-        return values
 
 
 class MasterNode(BaseModel):

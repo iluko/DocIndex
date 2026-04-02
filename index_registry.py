@@ -1,34 +1,41 @@
-"""Utilities for keeping each model's index artifacts in a separate folder.
+"""Utilities for keeping each project's index artifacts in a separate folder.
 
-This module answers questions like:
-- "Which directory should the current model write into?"
-- "Where does the active master tree live?"
-- "Should we migrate legacy flat storage into the new model-scoped layout?"
+Index layout:
+    data/indexes/{project}/          ← one directory per project (knowledge base)
+        master_tree.json
+        doc_trees/
+        derived_markdown/
+        doc_sources.json
+        index_meta.json              ← records which model last wrote here
+
+The model is a runtime-only parameter (used for LLM calls). Switching models
+does NOT change which documents are visible — only the project does that.
 """
 
 from __future__ import annotations
 
 import json
-import shutil
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from arch_map.arch_map import ArchitectureMap
-from master_tree.master_tree import MasterTreeStore
-from storage.store import DocumentStore
+from master_tree.factory import create_master_tree_store
+from storage.factory import create_document_store
 from utils import detect_llm_provider, get_default_model
 
 
-LEGACY_MIGRATION_MARKER = ".legacy_index_migration.json"
+DEFAULT_PROJECT = "default"
 
 
 @dataclass(frozen=True)
 class IndexContext:
-    """Describes the on-disk paths for one provider/model-specific index."""
+    """Describes the on-disk paths for one project-scoped index."""
 
     provider: str
     model: str
-    index_key: str
+    project: str        # always set — defaults to DEFAULT_PROJECT
+    index_key: str      # same as project (the directory name under indexes/)
     base_data_dir: Path
     index_dir: Path
     master_tree_path: Path
@@ -42,8 +49,8 @@ class RuntimeComponents:
     """Bundles the objects the UI/CLI need for one active index scope."""
 
     index_context: IndexContext
-    master_tree_store: MasterTreeStore
-    storage: DocumentStore
+    master_tree_store: Any  # MasterTreeStore or MongoMasterTreeStore
+    storage: Any  # DocumentStore or MongoDocumentStore
     arch_map: ArchitectureMap
 
 
@@ -70,24 +77,29 @@ def sanitize_index_key_part(value: str) -> str:
     return result or "default"
 
 
-def build_index_key(provider: str, model: str) -> str:
-    """Combine provider and model into the directory name for one index."""
-    return f"{sanitize_index_key_part(provider)}__{sanitize_index_key_part(model)}"
+def resolve_index_context(
+    base_data_dir: str | Path,
+    model: str | None = None,
+    project: str | None = None,
+) -> IndexContext:
+    """Resolve every important path for the active project.
 
-
-def resolve_index_context(base_data_dir: str | Path, model: str | None = None) -> IndexContext:
-    """Resolve every important path for the current runtime model."""
+    The index directory is ``data/indexes/{project}/``. The model is recorded
+    in metadata but does NOT affect which directory is used — switching models
+    does not change which documents you see.
+    """
     base_dir = Path(base_data_dir)
     provider = detect_llm_provider()
     resolved_model = model or get_default_model()
-    index_key = build_index_key(provider, resolved_model)
+    project_key = sanitize_index_key_part(project) if project else DEFAULT_PROJECT
     indexes_dir = base_dir / "indexes"
-    index_dir = indexes_dir / index_key
+    index_dir = indexes_dir / project_key
 
     return IndexContext(
         provider=provider,
         model=resolved_model,
-        index_key=index_key,
+        project=project_key,
+        index_key=project_key,
         base_data_dir=base_dir,
         index_dir=index_dir,
         master_tree_path=index_dir / "master_tree.json",
@@ -95,6 +107,23 @@ def resolve_index_context(base_data_dir: str | Path, model: str | None = None) -
         arch_map_path=base_dir / "arch_map.json",
         uploads_dir=base_dir / "uploads",
     )
+
+
+def list_projects(base_data_dir: str | Path) -> list[str]:
+    """Return all project names found under ``data/indexes/``.
+
+    Projects are the directory names immediately under the indexes folder.
+    Returns ``[DEFAULT_PROJECT]`` when no projects exist yet so callers
+    always have at least one option.
+    """
+    indexes_dir = Path(base_data_dir) / "indexes"
+    if not indexes_dir.exists():
+        return [DEFAULT_PROJECT]
+    names = sorted(
+        p.name for p in indexes_dir.iterdir()
+        if p.is_dir() and not p.name.startswith(".")
+    )
+    return names if names else [DEFAULT_PROJECT]
 
 
 def _read_json(path: Path) -> dict:
@@ -109,96 +138,36 @@ def _write_json(path: Path, payload: dict) -> None:
 
 
 def ensure_index_metadata(context: IndexContext) -> None:
-    """Persist a small metadata file that describes the active index scope."""
+    """Persist a small metadata file that describes the active index scope.
+
+    The model is recorded here (not in the directory path) so switching models
+    is transparent — the same documents remain accessible.
+    """
     payload = {
-        "provider": context.provider,
-        "model": context.model,
+        "project": context.project,
         "index_key": context.index_key,
+        "last_used_provider": context.provider,
+        "last_used_model": context.model,
         "index_dir": str(context.index_dir),
     }
     _write_json(context.metadata_path, payload)
 
 
-def _copy_if_exists(source: Path, destination: Path) -> None:
-    """Copy a file or directory only when the source exists.
-
-    Junior note:
-    `shutil.copytree(..., dirs_exist_ok=True)` lets us merge into an existing
-    directory instead of failing the way older Python examples often do.
-    """
-    if not source.exists():
-        return
-
-    if source.is_dir():
-        destination.mkdir(parents=True, exist_ok=True)
-        for child in source.iterdir():
-            target = destination / child.name
-            if child.is_dir():
-                shutil.copytree(child, target, dirs_exist_ok=True)
-            else:
-                shutil.copy2(child, target)
-        return
-
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(source, destination)
-
-
-def migrate_legacy_index_if_needed(context: IndexContext) -> bool:
-    """Copy the pre-model-scoped data layout into the active index once.
-
-    We keep a marker file so this migration does not run repeatedly on every app start.
-    """
-    marker_path = context.base_data_dir / LEGACY_MIGRATION_MARKER
-    if marker_path.exists():
-        return False
-
-    if context.master_tree_path.exists():
-        return False
-
-    legacy_master_tree = context.base_data_dir / "master_tree.json"
-    legacy_doc_trees = context.base_data_dir / "doc_trees"
-    legacy_doc_sources = context.base_data_dir / "doc_sources.json"
-    legacy_derived_markdown = context.base_data_dir / "derived_markdown"
-
-    if not any(
-        path.exists()
-        for path in (
-            legacy_master_tree,
-            legacy_doc_trees,
-            legacy_doc_sources,
-            legacy_derived_markdown,
-        )
-    ):
-        return False
-
-    _copy_if_exists(legacy_master_tree, context.master_tree_path)
-    _copy_if_exists(legacy_doc_trees, context.index_dir / "doc_trees")
-    _copy_if_exists(legacy_doc_sources, context.index_dir / "doc_sources.json")
-    _copy_if_exists(legacy_derived_markdown, context.index_dir / "derived_markdown")
-
-    _write_json(
-        marker_path,
-        {
-            "migrated_to_index_key": context.index_key,
-            "provider": context.provider,
-            "model": context.model,
-        },
-    )
-    return True
-
-
-def build_runtime_components(base_data_dir: str | Path, model: str | None = None) -> RuntimeComponents:
+def build_runtime_components(
+    base_data_dir: str | Path,
+    model: str | None = None,
+    project: str | None = None,
+) -> RuntimeComponents:
     """Construct the storage and lookup objects used by the active runtime."""
-    context = resolve_index_context(base_data_dir=base_data_dir, model=model)
+    context = resolve_index_context(base_data_dir=base_data_dir, model=model, project=project)
     context.index_dir.mkdir(parents=True, exist_ok=True)
     context.uploads_dir.mkdir(parents=True, exist_ok=True)
 
-    migrate_legacy_index_if_needed(context)
     ensure_index_metadata(context)
 
     return RuntimeComponents(
         index_context=context,
-        master_tree_store=MasterTreeStore(str(context.master_tree_path)),
-        storage=DocumentStore(str(context.index_dir)),
+        master_tree_store=create_master_tree_store(str(context.master_tree_path), context.project),
+        storage=create_document_store(str(context.index_dir), context.project),
         arch_map=ArchitectureMap(str(context.arch_map_path)),
     )

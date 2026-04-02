@@ -221,8 +221,6 @@ Output only the JSON object. No markdown. No explanation.
                     ),
                     key_categories=list(
                         payload.get("relevance_hints", {}).get("key_categories", [])
-                        # also accept the legacy field name from old LLM outputs
-                        or payload.get("relevance_hints", {}).get("key_modules", [])
                     ),
                 ),
                 top_sections=_normalize_top_sections(

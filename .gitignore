@@ -1,5 +1,17 @@
 .venv/
+.venv310/
 .pytest_cache/
 .vscode/
 .env
 *.pyc
+__pycache__/
+
+# Ingested data (re-ingestible; use STORAGE_BACKEND=mongodb to persist externally)
+data/indexes/
+data/uploads/
+data/doc_trees/
+data/derived_markdown/
+data/model_registry.json
+
+# Keep placeholder files so empty directories stay tracked
+!**/.gitkeep

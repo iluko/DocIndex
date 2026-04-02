@@ -14,10 +14,10 @@ import streamlit as st
 from dotenv import load_dotenv
 
 from ingestion.ingest import IngestionResult, ingest_document_with_trace
-from index_registry import IndexContext, build_runtime_components
+from index_registry import DEFAULT_PROJECT, IndexContext, build_runtime_components, list_projects
 from model_registry import ModelRegistry
-from retrieval.query_engine import QueryResult, query
-from utils import REASONING_EFFORT_OPTIONS, detect_llm_provider, get_default_model
+from retrieval.query_engine import QueryResult, SourceReference, query
+from utils import REASONING_EFFORT_OPTIONS, detect_llm_provider, get_default_model, validate_doc_id
 
 load_dotenv()
 
@@ -113,9 +113,9 @@ def slugify(value: str) -> str:
     return slug or "document"
 
 
-def build_runtime(model: str):
+def build_runtime(model: str, project: str | None = None):
     """Construct the model-scoped runtime bundle used by the UI."""
-    return build_runtime_components(DATA_DIR, model=model)
+    return build_runtime_components(DATA_DIR, model=model, project=project)
 
 
 def render_styles() -> None:
@@ -246,41 +246,58 @@ def ensure_session_state() -> None:
     st.session_state.setdefault("selected_doc_id", None)
     st.session_state.setdefault("active_index_key", None)
     st.session_state.setdefault("retrieval_reasoning_effort", "auto")
+    st.session_state.setdefault("project_name", "")
 
 
 def render_sidebar(
     master_tree_store,
     index_context: IndexContext,
     model_registry: ModelRegistry,
-) -> tuple[str, int, str | None]:
-    """Render runtime controls and return the current settings."""
-    st.sidebar.markdown("## Runtime")
+) -> tuple[str, int, str | None, str]:
+    """Render runtime controls and return (model, max_docs, reasoning_effort, project)."""
+    st.sidebar.markdown("## Project")
+
+    # ── Project selector (primary) ────────────────────────────────────────────
+    existing_projects = list_projects(DATA_DIR)
+    current_project = st.session_state.get("project_name", DEFAULT_PROJECT) or DEFAULT_PROJECT
+    # Ensure the active project appears even if it's brand new (not yet on disk).
+    if current_project not in existing_projects:
+        existing_projects = [current_project] + existing_projects
+
+    project = st.sidebar.selectbox(
+        "Active project",
+        options=existing_projects,
+        index=existing_projects.index(current_project),
+        help="Each project is an independent document collection with its own index.",
+    )
+    st.session_state["project_name"] = project
+
+    with st.sidebar.expander("Create project"):
+        with st.form("create_project_form", clear_on_submit=True):
+            new_project_name = st.text_input(
+                "New project name",
+                key="new_project_input",
+                help="Lowercase letters, numbers, and hyphens recommended.",
+            )
+            create_submitted = st.form_submit_button("Create", use_container_width=True)
+        if create_submitted and new_project_name.strip():
+            st.session_state["project_name"] = new_project_name.strip()
+            st.rerun()
+
+    st.sidebar.markdown("## Model")
+
+    # ── Model selector (secondary — LLM calls only, not storage) ─────────────
     current_model = st.session_state.get("model_name", get_default_model())
     model_registry.ensure_model(current_model)
     registered_models = model_registry.list_models()
     selected_index = registered_models.index(current_model) if current_model in registered_models else 0
     model = st.sidebar.selectbox(
-        "Registered model",
+        "LLM model",
         options=registered_models,
         index=selected_index,
-        help="For Azure, this should be your deployment name.",
-    )
-    max_docs = st.sidebar.slider("Max docs", min_value=1, max_value=5, value=3)
-    reasoning_options = ["auto", *REASONING_EFFORT_OPTIONS]
-    current_reasoning = st.session_state.get("retrieval_reasoning_effort", "auto")
-    if current_reasoning not in reasoning_options:
-        current_reasoning = "auto"
-    reasoning_effort = st.sidebar.selectbox(
-        "Retrieval reasoning",
-        options=reasoning_options,
-        index=reasoning_options.index(current_reasoning),
-        help="Used for routing, tree navigation, and final answer synthesis. Unsupported models will ignore it automatically.",
+        help="Switching models does not change which documents are visible — only the project does that.",
     )
     st.session_state["model_name"] = model
-    st.session_state["retrieval_reasoning_effort"] = reasoning_effort
-    st.sidebar.caption(f"Provider: `{detect_llm_provider()}`")
-    st.sidebar.caption(f"Index: `{index_context.index_key}`")
-    st.sidebar.caption("Ingestion reasoning: `high`")
 
     with st.sidebar.expander("Register model"):
         with st.form("register_model_form", clear_on_submit=True):
@@ -300,6 +317,25 @@ def render_sidebar(
                 st.session_state["model_name"] = added_model
                 st.rerun()
 
+    st.sidebar.markdown("## Query")
+    max_docs = st.sidebar.slider("Max docs", min_value=1, max_value=15, value=3)
+    reasoning_options = ["auto", *REASONING_EFFORT_OPTIONS]
+    current_reasoning = st.session_state.get("retrieval_reasoning_effort", "auto")
+    if current_reasoning not in reasoning_options:
+        current_reasoning = "auto"
+    reasoning_effort = st.sidebar.selectbox(
+        "Retrieval reasoning",
+        options=reasoning_options,
+        index=reasoning_options.index(current_reasoning),
+        help="Used for routing, tree navigation, and final answer synthesis. Unsupported models will ignore it automatically.",
+    )
+    st.session_state["retrieval_reasoning_effort"] = reasoning_effort
+
+    st.sidebar.caption(f"Provider: `{detect_llm_provider()}`")
+    st.sidebar.caption(f"Project: `{index_context.project}`")
+    st.sidebar.caption(f"Model: `{model}`")
+    st.sidebar.caption("Ingestion reasoning: `high`")
+
     docs = master_tree_store.list_docs()
     st.sidebar.markdown("## Indexed Docs")
     if docs:
@@ -309,10 +345,9 @@ def render_sidebar(
         st.sidebar.caption("No documents ingested yet.")
 
     st.sidebar.markdown("## Storage")
-    st.sidebar.caption(
-        f"This app uses model-scoped local JSON/file storage at `{index_context.index_dir}`."
-    )
-    return model, max_docs, None if reasoning_effort == "auto" else reasoning_effort
+    st.sidebar.caption(f"Project index at `{index_context.index_dir}`.")
+
+    return model, max_docs, None if reasoning_effort == "auto" else reasoning_effort, project
 
 
 def save_uploaded_file(uploaded_file, doc_id: str) -> Path:
@@ -471,6 +506,11 @@ def render_query_trace(result: QueryResult | None) -> None:
     render_metric("Selected Docs", ", ".join(result.selected_docs) or "None")
     render_metric("Selected Nodes", ", ".join(result.selected_nodes) or "None")
 
+    if result.sources:
+        with st.expander("Sources", expanded=True):
+            for src in result.sources:
+                st.markdown(f"- **{src.doc_id}** — {src.section} *(p. {src.page_range})*")
+
     if result.trace is not None:
         with st.expander("Navigation Map", expanded=True):
             st.json(result.trace.navigation)
@@ -508,7 +548,7 @@ def render_internal_map(master_tree_store, arch_map, index_context: IndexContext
     )
 
     st.caption(
-        f"Active index scope: provider `{index_context.provider}`, model `{index_context.model}`, key `{index_context.index_key}`."
+        f"Project: `{index_context.project}` — provider: `{index_context.provider}` — model: `{index_context.model}`"
     )
 
     col_a, col_b = st.columns(2)
@@ -590,7 +630,7 @@ def render_doc_browser(master_tree_store, storage, index_context: IndexContext) 
     """Show one document's saved master node and PageIndex tree."""
     docs = master_tree_store.list_docs()
     st.markdown("### Document Browser")
-    st.caption(f"Showing PageIndex output for the active model-specific index: `{index_context.index_key}`.")
+    st.caption(f"Project: `{index_context.project}` — documents are shared across all models.")
 
     if not docs:
         st.info("Ingest a document first to inspect its PageIndex output.")
@@ -664,27 +704,23 @@ def main() -> None:
     model_registry = ModelRegistry(MODEL_REGISTRY_PATH)
     active_model = st.session_state.get("model_name", get_default_model())
     model_registry.ensure_model(active_model)
-    runtime = build_runtime(active_model)
-    model, max_docs, reasoning_effort = render_sidebar(
+    active_project = st.session_state.get("project_name") or DEFAULT_PROJECT
+    runtime = build_runtime(active_model, project=active_project)
+    model, max_docs, reasoning_effort, project = render_sidebar(
         runtime.master_tree_store,
         runtime.index_context,
         model_registry,
     )
 
-    if model != active_model:
+    # When the user switches project or model, rebuild the runtime on the next run.
+    if model != active_model or project != runtime.index_context.project:
         st.session_state["model_name"] = model
+        st.session_state["project_name"] = project
         st.session_state["chat_history"] = []
         st.session_state["latest_query"] = None
         st.session_state["latest_ingestion"] = None
         st.session_state["selected_doc_id"] = None
         st.rerun()
-
-    if st.session_state.get("active_index_key") != runtime.index_context.index_key:
-        st.session_state["chat_history"] = []
-        st.session_state["latest_query"] = None
-        st.session_state["latest_ingestion"] = None
-        st.session_state["selected_doc_id"] = None
-        st.session_state["active_index_key"] = runtime.index_context.index_key
 
     st.markdown(
         """
@@ -719,27 +755,32 @@ def main() -> None:
                 elif not doc_id or not doc_title or not doc_type:
                     st.error("Document ID, title, and type are required.")
                 else:
-                    saved_path = save_uploaded_file(uploaded_file, doc_id)
-                    with st.status("Running ingestion", expanded=True) as status:
-                        st.write(f"Saved upload to `{saved_path}`")
-                        progress_handler = create_ingestion_progress_renderer(status)
-                        result = run_async_task_with_progress(
-                            lambda progress_callback: ingest_document_with_trace(
-                                file_path=str(saved_path),
-                                doc_id=doc_id,
-                                doc_title=doc_title,
-                                doc_type=doc_type,
-                                master_tree_store=runtime.master_tree_store,
-                                storage=runtime.storage,
-                                model=model,
-                                progress_callback=progress_callback,
-                            ),
-                            on_progress=progress_handler,
-                        )
-                        st.session_state.latest_ingestion = result
-                        runtime.master_tree_store.load()
-                        status.update(label="Ingestion complete", state="complete")
-                    st.success(f"Ingested `{doc_id}`.")
+                    try:
+                        validate_doc_id(doc_id)
+                    except ValueError as exc:
+                        st.error(str(exc))
+                    else:
+                        saved_path = save_uploaded_file(uploaded_file, doc_id)
+                        with st.status("Running ingestion", expanded=True) as status:
+                            st.write(f"Saved upload to `{saved_path}`")
+                            progress_handler = create_ingestion_progress_renderer(status)
+                            result = run_async_task_with_progress(
+                                lambda progress_callback: ingest_document_with_trace(
+                                    file_path=str(saved_path),
+                                    doc_id=doc_id,
+                                    doc_title=doc_title,
+                                    doc_type=doc_type,
+                                    master_tree_store=runtime.master_tree_store,
+                                    storage=runtime.storage,
+                                    model=model,
+                                    progress_callback=progress_callback,
+                                ),
+                                on_progress=progress_handler,
+                            )
+                            st.session_state.latest_ingestion = result
+                            runtime.master_tree_store.load()
+                            status.update(label="Ingestion complete", state="complete")
+                        st.success(f"Ingested `{doc_id}`.")
 
         with right:
             render_ingestion_trace(st.session_state.latest_ingestion)
@@ -752,28 +793,83 @@ def main() -> None:
 
         prompt = st.chat_input("Ask about your indexed documents")
         if prompt:
-            with st.spinner("Running router, navigator, fetcher, and answer synthesis..."):
-                result = run_async_task(
-                    query(
-                        user_query=prompt,
-                        master_tree_store=runtime.master_tree_store,
-                        storage=runtime.storage,
-                        arch_map=runtime.arch_map,
-                        model=model,
-                        chat_history=st.session_state.chat_history,
-                        max_docs=max_docs,
-                        verbose=False,
-                        reasoning_effort=reasoning_effort,
+            import asyncio
+            from queue import Queue
+            from threading import Thread
+
+            with st.chat_message("user"):
+                st.markdown(prompt)
+
+            # Capture session state on the main thread before spawning the worker.
+            # Streamlit session state cannot be accessed from background threads.
+            _current_history = list(st.session_state.chat_history)
+
+            token_queue: Queue = Queue()
+            result_holder: Queue = Queue()
+            _STREAM_DONE = object()
+
+            def _on_token(token: str) -> None:
+                token_queue.put(token)
+
+            def _run_query() -> None:
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                try:
+                    res = loop.run_until_complete(
+                        query(
+                            user_query=prompt,
+                            master_tree_store=runtime.master_tree_store,
+                            storage=runtime.storage,
+                            arch_map=runtime.arch_map,
+                            model=model,
+                            chat_history=_current_history,
+                            max_docs=max_docs,
+                            verbose=False,
+                            reasoning_effort=reasoning_effort,
+                            answer_token_callback=_on_token,
+                        )
                     )
-                )
-                st.session_state.chat_history = result.chat_history_updated
-                st.session_state.latest_query = result
+                    token_queue.put(_STREAM_DONE)
+                    result_holder.put((True, res))
+                except Exception as exc:
+                    token_queue.put(_STREAM_DONE)
+                    result_holder.put((False, exc))
+                finally:
+                    # Allow pending cleanup tasks (e.g. httpx connection close) to
+                    # finish before closing the loop, suppressing the harmless
+                    # "Event loop is closed" warning from async HTTP clients.
+                    try:
+                        pending = asyncio.all_tasks(loop)
+                        if pending:
+                            loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
+                    except Exception:
+                        pass
+                    loop.close()
+
+            _thread = Thread(target=_run_query, daemon=True)
+            _thread.start()
+
+            def _token_generator():
+                while True:
+                    item = token_queue.get()
+                    if item is _STREAM_DONE:
+                        break
+                    yield item
+
+            with st.chat_message("assistant"):
+                st.write_stream(_token_generator())
+
+            _thread.join()
+            _ok, _payload = result_holder.get()
+            if not _ok:
+                raise _payload
+            result = _payload
+            st.session_state.chat_history = result.chat_history_updated
+            st.session_state.latest_query = result
             st.rerun()
 
         latest_query = st.session_state.latest_query
         if latest_query is not None:
-            st.markdown("### Answer")
-            st.markdown(latest_query.answer)
             render_query_trace(latest_query)
 
     with docs_tab:

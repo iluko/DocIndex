@@ -6,9 +6,11 @@ import json
 from pathlib import Path
 
 from master_tree.schema import MasterNode
+from storage.base import AbstractDocumentStore
+from utils import atomic_write_text, validate_doc_id
 
 
-class DocumentStore:
+class DocumentStore(AbstractDocumentStore):
     """Small storage wrapper around the project's JSON files and folders."""
 
     def __init__(self, data_dir: str):
@@ -22,6 +24,7 @@ class DocumentStore:
 
     def _tree_path(self, doc_id: str) -> Path:
         """Compute the JSON path for one document's saved PageIndex tree."""
+        validate_doc_id(doc_id)
         return self.trees_dir / f"{doc_id}_tree.json"
 
     def _load_sources(self) -> dict[str, str | dict[str, str]]:
@@ -31,15 +34,13 @@ class DocumentStore:
         return json.loads(self.sources_path.read_text(encoding="utf-8"))
 
     def _save_sources(self, sources: dict[str, str | dict[str, str]]) -> None:
-        """Persist the source-path registry to disk."""
-        self.sources_path.write_text(
-            json.dumps(sources, indent=2, ensure_ascii=False), encoding="utf-8"
-        )
+        """Persist the source-path registry to disk atomically."""
+        atomic_write_text(self.sources_path, json.dumps(sources, indent=2, ensure_ascii=False))
 
     def save_doc_tree(self, doc_id: str, tree: dict) -> str:
         """Save one PageIndex tree and return the file path that was written."""
         path = self._tree_path(doc_id)
-        path.write_text(json.dumps(tree, indent=2, ensure_ascii=False), encoding="utf-8")
+        atomic_write_text(path, json.dumps(tree, indent=2, ensure_ascii=False))
         return str(path)
 
     def load_doc_tree(self, doc_id: str) -> dict:
@@ -57,9 +58,34 @@ class DocumentStore:
 
     def save_derived_markdown(self, doc_id: str, markdown: str) -> str:
         """Persist markdown generated from a DOCX source and return its path."""
+        validate_doc_id(doc_id)
         path = self.derived_markdown_dir / f"{doc_id}.md"
-        path.write_text(markdown, encoding="utf-8")
+        atomic_write_text(path, markdown)
         return str(path)
+
+    @property
+    def _base_data_dir(self) -> Path:
+        """The root data directory two levels above the project index dir.
+
+        Layout: data/indexes/{project}/ → parent.parent = data/
+        Paths inside this directory are stored relative so the whole data/
+        folder can be copied to another machine and remain resolvable.
+        """
+        return self.data_dir.parent.parent
+
+    def _to_portable_path(self, path: str) -> str:
+        """Return a path relative to _base_data_dir when possible, else absolute."""
+        try:
+            return str(Path(path).relative_to(self._base_data_dir))
+        except ValueError:
+            return path  # outside the data tree — keep as absolute
+
+    def _from_portable_path(self, path: str) -> str:
+        """Resolve a stored path back to an absolute path."""
+        p = Path(path)
+        if p.is_absolute():
+            return path
+        return str(self._base_data_dir / p)
 
     def register_doc_source(
         self, doc_id: str, file_path: str, retrieval_path: str | None = None
@@ -67,8 +93,8 @@ class DocumentStore:
         """Record both the original source path and the best retrieval-time path."""
         sources = self._load_sources()
         sources[doc_id] = {
-            "source_path": file_path,
-            "retrieval_path": retrieval_path or file_path,
+            "source_path": self._to_portable_path(file_path),
+            "retrieval_path": self._to_portable_path(retrieval_path or file_path),
         }
         self._save_sources(sources)
 
@@ -80,9 +106,8 @@ class DocumentStore:
                 f"No source file path recorded for doc_id='{doc_id}' in {self.sources_path}."
             )
         record = sources[doc_id]
-        if isinstance(record, str):
-            return record
-        return record.get("retrieval_path") or record.get("source_path", "")
+        raw = record.get("retrieval_path") or record.get("source_path", "")
+        return self._from_portable_path(raw)
 
     def get_doc_file_path(self, master_node: MasterNode) -> str:
         """Expose the original source path from a master-tree node."""

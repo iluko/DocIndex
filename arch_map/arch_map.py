@@ -5,10 +5,10 @@ areas, or entities in your knowledge domain and how they relate to each other.
 The router receives this map so it can widen its document selection when a query
 touches concepts that span multiple documents.
 
-Schema (either key is accepted):
+Schema:
   {
     "description": "Brief description of the domain",
-    "entities": [          <-- preferred key (or use "modules" for legacy compat)
+    "entities": [
       {
         "name": "Concept Name",
         "connects_to": ["Other Concept", "..."],
@@ -17,8 +17,7 @@ Schema (either key is accepted):
     ]
   }
 
-The file is optional. When absent or empty the router works without it and
-routing decisions fall back entirely to per-document metadata.
+The file is optional. When absent or empty the router works without it.
 """
 
 from __future__ import annotations
@@ -54,16 +53,13 @@ class ArchitectureMap:
     def to_llm_context(self) -> str:
         """Return a compact JSON string containing only the routing-relevant fields.
 
-        Accepts both ``entities`` (preferred) and ``modules`` (legacy) as the
-        top-level collection key so existing arch_map files continue to work.
-        Returns an empty string when the map is empty or has no entities, so
+        Returns an empty string when the map is empty or has no entities so
         callers can gate on truthiness without special-casing None.
         """
         if not self.data:
             return ""
 
-        # Accept either key; "entities" takes priority if both are present.
-        entities = self.data.get("entities") or self.data.get("modules") or []
+        entities = self.data.get("entities") or []
         if not entities:
             return ""
 

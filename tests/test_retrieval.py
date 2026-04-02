@@ -74,7 +74,7 @@ def test_navigator_returns_compound_node_refs(tmp_path: Path, monkeypatch) -> No
         reasoning_effort: str | None = None,
     ) -> str:
         """Pretend the navigator selected one good node, one bad node, then another good node."""
-        assert "Document Tree" in user_prompt
+        assert "What is the refresh flow?" in user_prompt
         assert reasoning_effort is None
         return '["0002", "9999", "0001"]'
 

@@ -88,9 +88,19 @@ pip install -r PageIndex/requirements.txt
 pip install -r requirements.txt
 ```
 
+For running tests:
+
+```bash
+pip install -r requirements-dev.txt
+```
+
 ### 3. Configure `.env`
 
-Copy `.env` and fill in your credentials.
+Copy `.env.example` to `.env` and fill in your credentials:
+
+```bash
+cp .env.example .env
+```
 
 **Azure OpenAI:**
 ```env
@@ -156,6 +166,8 @@ Supported file types: `.pdf`, `.md`, `.markdown`, `.docx`
 
 DOCX files are automatically converted to Markdown so heading structure is preserved.
 
+**`--doc-id` format:** alphanumeric, hyphens, and underscores only — must start with a letter or digit (e.g. `auth_spec_v2`, `onboarding-guide`).
+
 **List ingested documents:**
 ```bash
 python cli.py list-docs
@@ -219,24 +231,59 @@ python cli.py reingest --file updated.pdf --doc-id my_doc --title "Title" --doc-
 
 ---
 
-## Model-Scoped Indexes
+## Projects
 
-Each `provider + model` combination gets its own isolated index under `data/indexes/`. Ingesting with `gpt-4o` and querying with `gpt-4.1` will see different corpora. This is intentional — different models may require different retrieval tuning.
+Every CLI command and the web UI supports an optional `--project` flag (CLI) or project selector (UI) that scopes all operations to a named knowledge base. Different projects are completely isolated — documents, trees, and routing metadata never mix.
+
+```bash
+# Ingest into a named project
+python cli.py ingest --file doc.pdf --doc-id my_doc --title "Title" --doc-type spec \
+  --project acme_legal
+
+# Query that project
+python cli.py query "What is the indemnity clause?" --project acme_legal
+
+# List docs in a project
+python cli.py list-docs --project acme_legal
+```
+
+If `--project` is omitted, operations go to the `default` project.
+
+Index layout on disk:
 
 ```
 data/
-  arch_map.json          ← shared across all models
-  uploads/               ← original uploaded files
+  arch_map.json              ← shared domain context (tracked in git)
+  uploads/                   ← original uploaded files
   indexes/
-    azure__gpt_4_1/
+    default/                 ← default project
       master_tree.json
       doc_sources.json
       doc_trees/
       derived_markdown/
       index_meta.json
-    openai__gpt_4o/
+    acme_legal/              ← a named project
+      master_tree.json
       ...
 ```
+
+The active model is recorded in `index_meta.json` but does **not** determine which directory is used — you can switch models without losing your indexed documents.
+
+---
+
+## Storage Backends
+
+By default all index artifacts are written to the local `data/` directory. Set `STORAGE_BACKEND=mongodb` to persist to MongoDB instead, which is useful for containerised or multi-instance deployments.
+
+```env
+STORAGE_BACKEND=mongodb
+MONGODB_URI=mongodb://localhost:27017
+MONGODB_DATABASE=hybrid_approach
+```
+
+When using local storage, source paths inside `data/` are stored relative to the data root so the entire `data/` folder can be moved or copied to another machine without breaking retrieval.
+
+Both backends implement the same interface — no application code changes are needed when switching.
 
 ---
 
@@ -268,6 +315,8 @@ async def main():
 asyncio.run(main())
 ```
 
+Pass `project="my_project"` to `build_runtime_components` to scope the runtime to a named project.
+
 ---
 
 ## QueryTrace Fields
@@ -292,10 +341,17 @@ Every `QueryResult` carries a `trace` object for full observability:
 | Variable | Default | Description |
 |---|---|---|
 | `LLM_PROVIDER` | `openai` | `openai` or `azure` |
-| `LLM_MODEL` | — | Model or deployment name |
+| `LLM_MODEL` | — | Model or deployment name (overrides `OPENAI_MODEL` / `AZURE_OPENAI_CHAT_DEPLOYMENT`) |
 | `OPENAI_API_KEY` | — | OpenAI API key |
+| `OPENAI_MODEL` | — | OpenAI model name, e.g. `gpt-4o-2024-11-20` |
 | `AZURE_OPENAI_API_KEY` | — | Azure OpenAI API key |
 | `AZURE_OPENAI_ENDPOINT` | — | Azure endpoint URL |
+| `AZURE_OPENAI_BASE_URL` | *(derived)* | Full base URL; derived from `AZURE_OPENAI_ENDPOINT` if omitted |
+| `AZURE_OPENAI_CHAT_DEPLOYMENT` | — | Azure deployment name |
+| `CHATGPT_API_KEY` | *(auto-filled)* | PageIndex key; auto-filled from Azure key in Azure mode |
 | `DOMAIN_NAME` | *(blank)* | Name shown in answer prompt, e.g. `"Acme Docs"` |
 | `RETRIEVAL_MODE` | `hybrid` | `hybrid` or `pageindex` |
-| `NAVIGATOR_VERIFICATION` | `false` | `true` to enable post-navigation self-correction |
+| `NAVIGATOR_VERIFICATION` | `false` | `true` to enable post-navigation self-correction pass |
+| `STORAGE_BACKEND` | `local` | `local` (filesystem) or `mongodb` |
+| `MONGODB_URI` | `mongodb://localhost:27017` | MongoDB connection string (when `STORAGE_BACKEND=mongodb`) |
+| `MONGODB_DATABASE` | `hybrid_approach` | MongoDB database name (when `STORAGE_BACKEND=mongodb`) |

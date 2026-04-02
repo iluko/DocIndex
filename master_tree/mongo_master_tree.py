@@ -1,40 +1,75 @@
-"""Persistence and CRUD helpers for the master tree JSON file."""
+"""MongoDB-backed master tree store.
+
+Mirrors the public interface of MasterTreeStore so the rest of the app
+can use either backend without modification.
+
+Environment variables (same as MongoDocumentStore):
+    MONGODB_URI       — connection string (default: mongodb://localhost:27017)
+    MONGODB_DATABASE  — database name (default: hybrid_approach)
+
+Collection used:
+    master_trees — one document per project:
+        { project, version, docs: [...] }
+"""
 
 from __future__ import annotations
 
-from pathlib import Path
+import os
 
 from master_tree.schema import MasterNode, MasterTree as MasterTreeModel
-from utils import atomic_write_text, compact_json
+from utils import compact_json
 
 
-class MasterTreeStore:
-    """Load, update, and serialize the master tree used by the router."""
+class MongoMasterTreeStore:
+    """Persist and query the master tree in a MongoDB database."""
 
-    def __init__(self, master_tree_path: str):
-        """Point the store at one JSON file and load it immediately."""
-        self.master_tree_path = Path(master_tree_path)
-        self.master_tree_path.parent.mkdir(parents=True, exist_ok=True)
+    def __init__(self, project: str):
+        try:
+            from pymongo import MongoClient
+        except ImportError as exc:
+            raise ImportError(
+                "pymongo is required for MongoDB storage. "
+                "Install it with: pip install pymongo"
+            ) from exc
+
+        uri = os.environ.get("MONGODB_URI", "mongodb://localhost:27017")
+        db_name = os.environ.get("MONGODB_DATABASE", "hybrid_approach")
+        self._project = project
+
+        client = MongoClient(uri)
+        db = client[db_name]
+        self._col = db["master_trees"]
+        self._col.create_index([("project", 1)], unique=True)
+
+        # String identifier used by trace logging (mirrors MasterTreeStore.master_tree_path).
+        self.master_tree_path = f"mongodb://{db_name}/master_trees/{project}"
+
         self.tree = self.load()
 
+    def _filter(self) -> dict:
+        return {"project": self._project}
+
     def load(self) -> MasterTreeModel:
-        """Load the master tree from disk, or create an empty one if absent."""
-        if self.master_tree_path.exists():
-            self.tree = MasterTreeModel.model_validate_json(
-                self.master_tree_path.read_text(encoding="utf-8")
-            )
-        else:
+        record = self._col.find_one(self._filter())
+        if record is None:
             self.tree = MasterTreeModel()
+        else:
+            self.tree = MasterTreeModel.model_validate(
+                {"version": record.get("version", 1), "docs": record.get("docs", [])}
+            )
         return self.tree
 
     def save(self, tree: MasterTreeModel | None = None) -> None:
-        """Persist the current in-memory tree back to disk atomically."""
         if tree is not None:
             self.tree = tree
-        atomic_write_text(self.master_tree_path, self.tree.model_dump_json(indent=2))
+        payload = self.tree.model_dump(mode="json")
+        self._col.replace_one(
+            self._filter(),
+            {"project": self._project, **payload},
+            upsert=True,
+        )
 
     def add_node(self, node: MasterNode) -> None:
-        """Upsert one document into the master tree by `doc_id`."""
         docs = list(self.tree.docs)
         for index, existing in enumerate(docs):
             if existing.doc_id == node.doc_id:
@@ -42,25 +77,15 @@ class MasterTreeStore:
                 break
         else:
             docs.append(node)
-
         self.tree = MasterTreeModel(version=self.tree.version, docs=docs)
 
     def get_node(self, doc_id: str) -> MasterNode | None:
-        """Return one document node or `None` if the doc id is unknown."""
         return next((doc for doc in self.tree.docs if doc.doc_id == doc_id), None)
 
     def list_docs(self) -> list[MasterNode]:
-        """Return a shallow copy of all stored document nodes."""
         return list(self.tree.docs)
 
     def remove_node(self, doc_id: str) -> bool:
-        """Remove one document from the master tree by ``doc_id``.
-
-        Returns ``True`` if the document was found and removed, ``False`` if
-        it was not present (so the caller can decide whether to error or warn).
-        The change is applied to the in-memory tree only; call ``save()`` to
-        persist it.
-        """
         docs = [doc for doc in self.tree.docs if doc.doc_id != doc_id]
         if len(docs) == len(self.tree.docs):
             return False
@@ -68,12 +93,6 @@ class MasterTreeStore:
         return True
 
     def to_llm_context(self) -> str:
-        """Serialize only routing-relevant fields for prompt injection.
-
-        Junior note:
-        We intentionally omit operational fields like file paths and timestamps
-        so the router focuses on meaning, not storage details.
-        """
         routing_docs = []
         for doc in self.tree.docs:
             routing_docs.append(
@@ -94,5 +113,4 @@ class MasterTreeStore:
                     "related_docs": doc.related_docs,
                 }
             )
-
         return compact_json({"version": self.tree.version, "docs": routing_docs})

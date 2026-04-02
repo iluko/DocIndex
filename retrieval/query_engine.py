@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import Callable
 from dataclasses import dataclass, field
 
 from dotenv import load_dotenv
@@ -47,6 +48,10 @@ from utils import (
     get_domain_name,
     get_navigator_verification_enabled,
     get_retrieval_mode,
+    is_reasoning_effort_unsupported_error,
+    is_temperature_unsupported_error,
+    model_supports_explicit_temperature,
+    normalize_reasoning_effort,
 )
 
 load_dotenv()
@@ -73,6 +78,16 @@ class QueryTrace:
 
 
 @dataclass
+class SourceReference:
+    """One document section cited in the answer."""
+
+    node_ref: str
+    doc_id: str
+    section: str
+    page_range: str  # e.g. "12-15" or "7"
+
+
+@dataclass
 class QueryResult:
     """Full query result, including answer text and trace/debug information."""
 
@@ -82,6 +97,7 @@ class QueryResult:
     retrieved_context: str
     chat_history_updated: list[dict]
     trace: QueryTrace | None = None
+    sources: list[SourceReference] = field(default_factory=list)
 
 
 # ── Internal helpers ──────────────────────────────────────────────────────────
@@ -108,6 +124,54 @@ async def _answer_query(
     return extract_llm_text(response)
 
 
+async def _answer_query_streaming(
+    model: str,
+    system_prompt: str,
+    user_prompt: str,
+    reasoning_effort: str | None,
+    on_token: Callable[[str], None],
+) -> str:
+    """Stream the answer LLM call, calling on_token for each chunk, and return the full text."""
+    client = get_async_client()
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": user_prompt},
+    ]
+    request_kwargs: dict = {
+        "model": model,
+        "messages": messages,
+        "stream": True,
+    }
+    if model_supports_explicit_temperature(model):
+        request_kwargs["temperature"] = 0.1
+    normalized_effort = normalize_reasoning_effort(reasoning_effort)
+    if normalized_effort:
+        request_kwargs["reasoning_effort"] = normalized_effort
+
+    while True:
+        try:
+            stream = await client.chat.completions.create(**request_kwargs)
+            break
+        except Exception as exc:
+            stripped = False
+            if "reasoning_effort" in request_kwargs and is_reasoning_effort_unsupported_error(exc):
+                request_kwargs.pop("reasoning_effort")
+                stripped = True
+            if "temperature" in request_kwargs and is_temperature_unsupported_error(exc):
+                request_kwargs.pop("temperature")
+                stripped = True
+            if not stripped:
+                raise
+
+    collected: list[str] = []
+    async for chunk in stream:
+        if chunk.choices and chunk.choices[0].delta.content:
+            token: str = chunk.choices[0].delta.content
+            on_token(token)
+            collected.append(token)
+    return "".join(collected)
+
+
 def _build_answer_system_prompt(
     retrieved_context: str,
     arch_map_context: str,
@@ -125,15 +189,15 @@ def _build_answer_system_prompt(
         intro = (
             f"You are an expert assistant for {domain_name}. "
             "Answer the user's question using ONLY the retrieved document context "
-            "provided. Be precise and reference specific sections when helpful. "
+            "provided. Use inline citations like [doc_id, p.N–M] when drawing on specific sections. End your answer with a **Sources** block. "
             "If the context does not contain sufficient information to answer, "
             "say so clearly."
         )
     else:
         intro = (
             "You are a knowledgeable assistant. Answer the user's question using "
-            "ONLY the retrieved document context provided. Be precise and reference "
-            "specific sections when helpful. If the context does not contain "
+            "ONLY the retrieved document context provided. Use inline citations like [doc_id, p.N–M] when drawing on specific sections. End your answer with a **Sources** block. "
+            "If the context does not contain "
             "sufficient information to answer, say so clearly."
         )
 
@@ -215,6 +279,7 @@ async def _run_hybrid(
     model: str,
     verbose: bool,
     reasoning_effort: str | None,
+    answer_token_callback: Callable[[str], None] | None = None,
 ) -> tuple[
     str,            # answer
     list[str],      # selected_nodes
@@ -289,7 +354,12 @@ async def _run_hybrid(
     )
     user_prompt = f"{user_query}\n\n{chat_history_block}".strip()
 
-    answer = await _answer_query(model, system_prompt, user_prompt, reasoning_effort)
+    if answer_token_callback is not None:
+        answer = await _answer_query_streaming(
+            model, system_prompt, user_prompt, reasoning_effort, answer_token_callback
+        )
+    else:
+        answer = await _answer_query(model, system_prompt, user_prompt, reasoning_effort)
 
     return (
         answer,
@@ -355,6 +425,7 @@ async def query(
     max_docs: int = 3,
     verbose: bool = False,
     reasoning_effort: str | None = None,
+    answer_token_callback: Callable[[str], None] | None = None,
 ) -> QueryResult:
     """Execute the complete retrieval workflow for one user question.
 
@@ -421,6 +492,7 @@ async def query(
             selected_nodes=[],
             retrieved_context="",
             chat_history_updated=updated_history,
+            sources=[],
             trace=QueryTrace(
                 routed_docs=[],
                 navigation={},
@@ -458,6 +530,7 @@ async def query(
             selected_nodes=selected_nodes,
             retrieved_context=retrieved_context,
             chat_history_updated=updated_history,
+            sources=[],
             trace=QueryTrace(
                 routed_docs=selected_doc_ids,
                 navigation=navigation_map,
@@ -491,7 +564,18 @@ async def query(
         model=model,
         verbose=verbose,
         reasoning_effort=reasoning_effort,
+        answer_token_callback=answer_token_callback,
     )
+
+    sources = [
+        SourceReference(
+            node_ref=chunk.node_ref,
+            doc_id=chunk.doc_id,
+            section=chunk.title,
+            page_range=f"{chunk.start_index}–{chunk.end_index}",
+        )
+        for chunk in chunks
+    ]
 
     updated_history = history + [
         {"role": "user", "content": user_query},
@@ -503,6 +587,7 @@ async def query(
         selected_nodes=selected_nodes,
         retrieved_context=retrieved_context,
         chat_history_updated=updated_history,
+        sources=sources,
         trace=QueryTrace(
             routed_docs=selected_doc_ids,
             navigation=navigation_map,

@@ -102,6 +102,8 @@ class _AgentState:
     retrieved_texts: list[str] = field(default_factory=list)
     accessed_nodes: list[str] = field(default_factory=list)
     tool_calls_made: int = 0
+    content_tokens: int = 0
+    content_token_budget: int = 60000  # overridden at initialisation time
 
 
 def _doc_summary_block(
@@ -153,8 +155,9 @@ def _execute_get_node_content(
     doc_id: str,
     node_id: str,
     storage: DocumentStore,
+    state: _AgentState,
 ) -> str:
-    """Tool handler: return raw text for one tree node."""
+    """Tool handler: return raw text for one tree node, subject to a token budget."""
     try:
         tree = storage.load_doc_tree(doc_id)
         valid = collect_node_ids(tree)
@@ -165,12 +168,23 @@ def _execute_get_node_content(
         file_path = storage.load_doc_source_path(doc_id)
         node_ref = f"{doc_id}::{node_id}"
         chunk = _build_retrieved_chunk(node_ref, tree, file_path)
-        return chunk.text
     except (FileNotFoundError, KeyError, ValueError) as exc:
         return json.dumps({"error": str(exc)})
 
+    if state.content_tokens + chunk.estimated_tokens > state.content_token_budget:
+        return json.dumps({
+            "budget_exhausted": True,
+            "message": (
+                "Content token budget reached. "
+                "Answer based on what you have already retrieved."
+            ),
+        })
 
-def _dispatch_tool(name: str, raw_args: str, storage: DocumentStore) -> str:
+    state.content_tokens += chunk.estimated_tokens
+    return chunk.text
+
+
+def _dispatch_tool(name: str, raw_args: str, storage: DocumentStore, state: _AgentState) -> str:
     """Parse tool arguments and route to the correct handler."""
     try:
         args = json.loads(raw_args or "{}")
@@ -184,7 +198,7 @@ def _dispatch_tool(name: str, raw_args: str, storage: DocumentStore) -> str:
     if name == "get_node_content":
         doc_id = args.get("doc_id", "")
         node_id = args.get("node_id", "")
-        return _execute_get_node_content(doc_id, node_id, storage)
+        return _execute_get_node_content(doc_id, node_id, storage, state)
 
     return json.dumps({"error": f"Unknown tool '{name}'."})
 
@@ -262,6 +276,7 @@ async def run_pageindex_retrieval(
     chat_history: list[dict] | None = None,
     reasoning_effort: str | None = None,
     max_tool_calls: int = 12,
+    model_max_tokens: int = 100000,
 ) -> tuple[str, list[str], str]:
     """Run PageIndex-style agentic retrieval for the pre-selected documents.
 
@@ -302,6 +317,7 @@ contain enough information, say so clearly.
 """.strip()
 
     state = _AgentState()
+    state.content_token_budget = int(model_max_tokens * 0.7)
     state.messages = [
         {"role": "system", "content": system_prompt},
         {"role": "user", "content": f"{user_query}\n\n{chat_block}".strip()},
@@ -344,7 +360,7 @@ contain enough information, say so clearly.
                 name = getattr(tc.function, "name", "")
                 raw_args = getattr(tc.function, "arguments", "{}")
 
-            result = _dispatch_tool(name, raw_args, storage)
+            result = _dispatch_tool(name, raw_args, storage, state)
             state.tool_calls_made += 1
 
             # Track which nodes were actually read.

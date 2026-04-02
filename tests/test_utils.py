@@ -194,7 +194,12 @@ def test_patch_pageindex_llm_helpers_uses_temperature_fallback(monkeypatch) -> N
         lambda api_key=None: _FakeAsyncClient(async_calls, fail_once_on_temperature=True),
     )
 
-    pageindex_utils = SimpleNamespace()
+    # Seed the namespace with the attributes the interface guard expects.
+    pageindex_utils = SimpleNamespace(
+        ChatGPT_API_with_finish_reason=None,
+        ChatGPT_API=None,
+        ChatGPT_API_async=None,
+    )
     pageindex_module = SimpleNamespace(ChatGPT_API_async=None)
 
     utils.patch_pageindex_llm_helpers(pageindex_utils, pageindex_module)

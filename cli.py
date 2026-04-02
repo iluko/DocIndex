@@ -16,7 +16,7 @@ from rich.table import Table
 from ingestion.ingest import ingest_document
 from index_registry import build_runtime_components
 from retrieval.query_engine import query as run_query
-from utils import REASONING_EFFORT_OPTIONS, get_default_model, normalize_reasoning_effort
+from utils import REASONING_EFFORT_OPTIONS, get_default_model, normalize_reasoning_effort, validate_doc_id
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -55,14 +55,94 @@ DEFAULT_MODEL = get_default_model()
 console = Console()
 
 
-def _build_runtime(model: str):
+def _build_runtime(model: str, project: str | None = None):
     """Build the model-scoped runtime bundle used by CLI commands."""
-    return build_runtime_components(DATA_DIR, model=model)
+    return build_runtime_components(DATA_DIR, model=model, project=project)
 
 
 @click.group()
 def cli() -> None:
     """Multi-document PageIndex CLI."""
+
+
+@cli.command("init")
+def init_command() -> None:
+    """Interactive setup wizard — writes .env with your LLM credentials."""
+    provider = click.prompt(
+        "Provider",
+        type=click.Choice(["openai", "azure"], case_sensitive=False),
+        default="openai",
+    ).lower()
+
+    api_key = click.prompt("API key", hide_input=True)
+
+    endpoint = ""
+    if provider == "azure":
+        endpoint = click.prompt("Azure endpoint (e.g. https://YOUR_RESOURCE.openai.azure.com)").strip().rstrip("/")
+
+    if provider == "azure":
+        model_label = "Deployment name"
+    else:
+        model_label = "Model name"
+    model = click.prompt(model_label, default="gpt-4o" if provider == "openai" else "").strip()
+
+    domain = click.prompt("Domain name (optional, press Enter to skip)", default="").strip()
+
+    env_path = BASE_DIR / ".env"
+    if env_path.exists():
+        existing = env_path.read_text(encoding="utf-8")
+        has_key = any(
+            line.strip() and not line.startswith("#") and "API_KEY=" in line and line.split("=", 1)[1].strip()
+            for line in existing.splitlines()
+        )
+        if has_key:
+            click.confirm(".env already exists with API key values. Overwrite?", abort=True)
+
+    if provider == "openai":
+        content = (
+            f"LLM_PROVIDER=openai\n"
+            f"LLM_MODEL={model}\n"
+            f"\n"
+            f"DOMAIN_NAME={domain}\n"
+            f"\n"
+            f"RETRIEVAL_MODE=hybrid\n"
+            f"NAVIGATOR_VERIFICATION=false\n"
+            f"\n"
+            f"OPENAI_API_KEY={api_key}\n"
+            f"OPENAI_MODEL={model}\n"
+            f"\n"
+            f"# Azure OpenAI (not configured)\n"
+            f"AZURE_OPENAI_API_KEY=\n"
+            f"AZURE_OPENAI_ENDPOINT=\n"
+            f"AZURE_OPENAI_BASE_URL=\n"
+            f"AZURE_OPENAI_CHAT_DEPLOYMENT=\n"
+            f"\n"
+            f"CHATGPT_API_KEY={api_key}\n"
+        )
+    else:
+        content = (
+            f"LLM_PROVIDER=azure\n"
+            f"LLM_MODEL={model}\n"
+            f"\n"
+            f"DOMAIN_NAME={domain}\n"
+            f"\n"
+            f"RETRIEVAL_MODE=hybrid\n"
+            f"NAVIGATOR_VERIFICATION=false\n"
+            f"\n"
+            f"# OpenAI (not configured)\n"
+            f"OPENAI_API_KEY=\n"
+            f"OPENAI_MODEL=gpt-4o-2024-11-20\n"
+            f"\n"
+            f"AZURE_OPENAI_API_KEY={api_key}\n"
+            f"AZURE_OPENAI_ENDPOINT={endpoint}\n"
+            f"AZURE_OPENAI_BASE_URL={endpoint}/openai/v1/\n"
+            f"AZURE_OPENAI_CHAT_DEPLOYMENT={model}\n"
+            f"\n"
+            f"CHATGPT_API_KEY={api_key}\n"
+        )
+
+    env_path.write_text(content, encoding="utf-8")
+    console.print(f"[green]Wrote .env to {env_path}[/green]")
 
 
 @cli.command()
@@ -71,9 +151,14 @@ def cli() -> None:
 @click.option("--title", "doc_title", required=True)
 @click.option("--doc-type", required=True)
 @click.option("--model", default=DEFAULT_MODEL, show_default=True)
-def ingest(file_path: Path, doc_id: str, doc_title: str, doc_type: str, model: str) -> None:
-    """Ingest one source document into the active model-specific index."""
-    runtime = _build_runtime(model)
+@click.option("--project", default=None, help="Optional project namespace for index isolation.")
+def ingest(file_path: Path, doc_id: str, doc_title: str, doc_type: str, model: str, project: str | None) -> None:
+    """Ingest one source document into the active project index."""
+    try:
+        validate_doc_id(doc_id)
+    except ValueError as exc:
+        raise click.BadParameter(str(exc), param_hint="--doc-id") from exc
+    runtime = _build_runtime(model, project=project)
     master_node = asyncio.run(
         ingest_document(
             file_path=str(file_path),
@@ -85,7 +170,7 @@ def ingest(file_path: Path, doc_id: str, doc_title: str, doc_type: str, model: s
             model=model,
         )
     )
-    console.print(f"Using index: {runtime.index_context.index_key}")
+    console.print(f"Project: {runtime.index_context.project}  |  Model: {model}")
     console.print(JSON.from_data(master_node.model_dump(mode="json")))
 
 
@@ -100,21 +185,34 @@ def ingest(file_path: Path, doc_id: str, doc_title: str, doc_type: str, model: s
     type=click.Choice(["auto", *REASONING_EFFORT_OPTIONS], case_sensitive=False),
 )
 @click.option("--verbose", is_flag=True)
+@click.option("--stream", "use_stream", is_flag=True, default=False, help="Stream the answer token by token.")
+@click.option("--project", default=None, help="Optional project namespace for index isolation.")
 def query_command(
     user_query: str,
     max_docs: int,
     model: str,
     reasoning_effort: str,
     verbose: bool,
+    use_stream: bool,
+    project: str | None,
 ) -> None:
     """Run interactive querying with optional follow-up turns."""
-    runtime = _build_runtime(model)
+    runtime = _build_runtime(model, project=project)
     chat_history: list[dict] = []
     current_query = user_query
-    console.print(f"Using index: {runtime.index_context.index_key}")
+    console.print(f"Project: {runtime.index_context.project}  |  Model: {model}")
     console.print(f"Retrieval reasoning: {normalize_reasoning_effort(reasoning_effort) or 'auto'}")
 
     while True:
+        if use_stream:
+            def on_token(token: str) -> None:
+                import sys
+                sys.stdout.write(token)
+                sys.stdout.flush()
+            cb = on_token
+        else:
+            cb = None
+
         result = asyncio.run(
             run_query(
                 user_query=current_query,
@@ -126,12 +224,22 @@ def query_command(
                 max_docs=max_docs,
                 verbose=verbose,
                 reasoning_effort=normalize_reasoning_effort(reasoning_effort),
+                answer_token_callback=cb,
             )
         )
-        console.print(Panel(result.answer, title="Answer", expand=False))
+
+        if use_stream:
+            console.print()  # newline after streamed answer
+        else:
+            console.print(Panel(result.answer, title="Answer", expand=False))
+
         if verbose:
             console.print(f"Selected docs: {result.selected_docs}")
             console.print(f"Selected nodes: {result.selected_nodes}")
+            if result.sources:
+                console.print("Sources:")
+                for src in result.sources:
+                    console.print(f"  [{src.doc_id}] {src.section} (p.{src.page_range})")
 
         chat_history = result.chat_history_updated
         follow_up = console.input("Follow-up (or 'exit'): ").strip()
@@ -142,15 +250,16 @@ def query_command(
 
 @cli.command("list-docs")
 @click.option("--model", default=DEFAULT_MODEL, show_default=True)
-def list_docs_command(model: str) -> None:
-    """Print the documents stored in the active model-specific index."""
-    runtime = _build_runtime(model)
+@click.option("--project", default=None, help="Optional project namespace for index isolation.")
+def list_docs_command(model: str, project: str | None) -> None:
+    """Print the documents stored in the active project index."""
+    runtime = _build_runtime(model, project=project)
     docs = runtime.master_tree_store.list_docs()
     if not docs:
-        console.print(f"No documents ingested yet for index: {runtime.index_context.index_key}")
+        console.print(f"No documents ingested yet in project: {runtime.index_context.project}")
         return
 
-    table = Table(title=f"Indexed Documents ({runtime.index_context.index_key})")
+    table = Table(title=f"Indexed Documents — project: {runtime.index_context.project}")
     table.add_column("doc_id")
     table.add_column("doc_title")
     table.add_column("doc_type")
@@ -165,9 +274,10 @@ def list_docs_command(model: str) -> None:
 @cli.command("show-master-tree")
 @click.option("--model", default=DEFAULT_MODEL, show_default=True)
 @click.option("--doc-id", default=None)
-def show_master_tree(model: str, doc_id: str | None) -> None:
+@click.option("--project", default=None, help="Optional project namespace for index isolation.")
+def show_master_tree(model: str, doc_id: str | None, project: str | None) -> None:
     """Print either the whole master tree or one selected master node."""
-    runtime = _build_runtime(model)
+    runtime = _build_runtime(model, project=project)
 
     if doc_id:
         node = runtime.master_tree_store.get_node(doc_id)
@@ -184,28 +294,29 @@ def show_master_tree(model: str, doc_id: str | None) -> None:
 @click.option("--model", default=DEFAULT_MODEL, show_default=True)
 @click.option("--yes", "confirmed", is_flag=True, default=False,
               help="Skip the confirmation prompt.")
-def delete_doc_command(doc_id: str, model: str, confirmed: bool) -> None:
+@click.option("--project", default=None, help="Optional project namespace for index isolation.")
+def delete_doc_command(doc_id: str, model: str, confirmed: bool, project: str | None) -> None:
     """Permanently remove DOC_ID from the active index.
 
     Deletes the master tree entry, the per-document PageIndex tree, the
     source-path registry record, and any derived Markdown (DOCX sources).
     This cannot be undone — reingest the document to restore it.
     """
-    runtime = _build_runtime(model)
+    runtime = _build_runtime(model, project=project)
 
     if runtime.master_tree_store.get_node(doc_id) is None:
         raise click.ClickException(
-            f"Document '{doc_id}' not found in index '{runtime.index_context.index_key}'."
+            f"Document '{doc_id}' not found in project '{runtime.index_context.project}'."
         )
 
     if not confirmed:
         click.confirm(
-            f"Permanently delete '{doc_id}' from index "
-            f"'{runtime.index_context.index_key}'?",
+            f"Permanently delete '{doc_id}' from project "
+            f"'{runtime.index_context.project}'?",
             abort=True,
         )
 
-    console.print(f"Deleting '{doc_id}' from index: {runtime.index_context.index_key}")
+    console.print(f"Deleting '{doc_id}' from project: {runtime.index_context.project}")
     _delete_document(runtime, doc_id)
     console.print(f"[green]Deleted '{doc_id}' successfully.[/green]")
 
@@ -218,6 +329,7 @@ def delete_doc_command(doc_id: str, model: str, confirmed: bool) -> None:
 @click.option("--model", default=DEFAULT_MODEL, show_default=True)
 @click.option("--yes", "confirmed", is_flag=True, default=False,
               help="Skip the confirmation prompt when a previous version exists.")
+@click.option("--project", default=None, help="Optional project namespace for index isolation.")
 def reingest_command(
     file_path: Path,
     doc_id: str,
@@ -225,6 +337,7 @@ def reingest_command(
     doc_type: str,
     model: str,
     confirmed: bool,
+    project: str | None,
 ) -> None:
     """Replace an existing document with a fresh ingestion run.
 
@@ -232,13 +345,17 @@ def reingest_command(
     the old version is removed. Equivalent to delete-doc followed by ingest,
     but atomic from the CLI's perspective.
     """
-    runtime = _build_runtime(model)
+    try:
+        validate_doc_id(doc_id)
+    except ValueError as exc:
+        raise click.BadParameter(str(exc), param_hint="--doc-id") from exc
+    runtime = _build_runtime(model, project=project)
     existing = runtime.master_tree_store.get_node(doc_id)
 
     if existing is not None and not confirmed:
         click.confirm(
-            f"'{doc_id}' already exists in index "
-            f"'{runtime.index_context.index_key}'. "
+            f"'{doc_id}' already exists in project "
+            f"'{runtime.index_context.project}'. "
             "Delete the existing version and reingest?",
             abort=True,
         )
@@ -247,7 +364,7 @@ def reingest_command(
         console.print(f"Removing previous version of '{doc_id}'…")
         _delete_document(runtime, doc_id)
 
-    console.print(f"Ingesting '{doc_id}' into index: {runtime.index_context.index_key}")
+    console.print(f"Ingesting '{doc_id}' into project: {runtime.index_context.project}  |  model: {model}")
     master_node = asyncio.run(
         ingest_document(
             file_path=str(file_path),
