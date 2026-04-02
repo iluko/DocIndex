@@ -761,52 +761,22 @@ def patch_pageindex_llm_helpers(pageindex_utils_module: Any, *target_modules: An
 
     This is how we keep GPT-5/Azure quirks, reasoning effort, and retry behavior
     centralized in our own code instead of modifying the vendored dependency.
-    """
-    def chatgpt_api_with_finish_reason(
-        model: str,
-        prompt: str,
-        api_key: str | None = None,
-        chat_history: list[dict] | None = None,
-    ) -> tuple[str, str]:
-        """Patched sync PageIndex helper that also reports finish reason."""
-        max_retries = 10
-        for attempt in range(max_retries):
-            try:
-                client = get_sync_client(api_key=api_key)
-                response = create_chat_completion(
-                    client=client,
-                    model=model,
-                    messages=_pageindex_messages(prompt, chat_history),
-                    temperature=0,
-                    reasoning_effort=INGESTION_REASONING_EFFORT,
-                )
-                finish_reason = extract_finish_reason(response)
-                if finish_reason == "length":
-                    return extract_llm_text(response), "max_output_reached"
-                return extract_llm_text(response), "finished"
-            except Exception as exc:  # pragma: no cover - network/runtime behavior
-                logger.warning(
-                    "PageIndex LLM call attempt %d/%d failed, retrying in 1 s: %s",
-                    attempt + 1, max_retries, exc,
-                )
-                if attempt < max_retries - 1:
-                    time.sleep(1)
-                else:
-                    raise RuntimeError(
-                        f"PageIndex LLM call failed after {max_retries} retries: {exc}"
-                    )
 
-    def chatgpt_api(
+    PageIndex uses ``from .utils import *`` in its module files, so after the
+    wildcard import the functions live directly in each module's own namespace.
+    We therefore patch every target module individually in addition to utils.
+    """
+    def llm_completion(
         model: str,
         prompt: str,
-        api_key: str | None = None,
         chat_history: list[dict] | None = None,
-    ) -> str:
-        """Patched sync PageIndex helper that returns only generated text."""
+        return_finish_reason: bool = False,
+    ) -> "str | tuple[str, str]":
+        """Patched sync helper — mirrors PageIndex's llm_completion signature."""
         max_retries = 10
         for attempt in range(max_retries):
             try:
-                client = get_sync_client(api_key=api_key)
+                client = get_sync_client()
                 response = create_chat_completion(
                     client=client,
                     model=model,
@@ -814,6 +784,11 @@ def patch_pageindex_llm_helpers(pageindex_utils_module: Any, *target_modules: An
                     temperature=0,
                     reasoning_effort=INGESTION_REASONING_EFFORT,
                 )
+                if return_finish_reason:
+                    finish_reason = extract_finish_reason(response)
+                    if finish_reason == "length":
+                        return extract_llm_text(response), "max_output_reached"
+                    return extract_llm_text(response), "finished"
                 return extract_llm_text(response)
             except Exception as exc:  # pragma: no cover - network/runtime behavior
                 logger.warning(
@@ -827,16 +802,15 @@ def patch_pageindex_llm_helpers(pageindex_utils_module: Any, *target_modules: An
                         f"PageIndex LLM call failed after {max_retries} retries: {exc}"
                     )
 
-    async def chatgpt_api_async(
+    async def llm_acompletion(
         model: str,
         prompt: str,
-        api_key: str | None = None,
     ) -> str:
-        """Patched async PageIndex helper used during summary generation."""
+        """Patched async helper — mirrors PageIndex's llm_acompletion signature."""
         max_retries = 10
         for attempt in range(max_retries):
             try:
-                async with get_async_client(api_key=api_key) as client:
+                async with get_async_client() as client:
                     response = await create_chat_completion_async(
                         client=client,
                         model=model,
@@ -857,11 +831,7 @@ def patch_pageindex_llm_helpers(pageindex_utils_module: Any, *target_modules: An
                         f"PageIndex LLM call failed after {max_retries} retries: {exc}"
                     )
 
-    _EXPECTED_PAGEINDEX_ATTRS = (
-        "ChatGPT_API_with_finish_reason",
-        "ChatGPT_API",
-        "ChatGPT_API_async",
-    )
+    _EXPECTED_PAGEINDEX_ATTRS = ("llm_completion", "llm_acompletion")
     missing = [a for a in _EXPECTED_PAGEINDEX_ATTRS if not hasattr(pageindex_utils_module, a)]
     if missing:
         raise RuntimeError(
@@ -870,18 +840,13 @@ def patch_pageindex_llm_helpers(pageindex_utils_module: Any, *target_modules: An
             "Update the compatibility patch in utils.py to match the new interface."
         )
 
-    pageindex_utils_module.ChatGPT_API_with_finish_reason = chatgpt_api_with_finish_reason
-    pageindex_utils_module.ChatGPT_API = chatgpt_api
-    pageindex_utils_module.ChatGPT_API_async = chatgpt_api_async
-
-    for module in target_modules:
-        for name, func in (
-            ("ChatGPT_API_with_finish_reason", chatgpt_api_with_finish_reason),
-            ("ChatGPT_API", chatgpt_api),
-            ("ChatGPT_API_async", chatgpt_api_async),
-        ):
-            if hasattr(module, name):
-                setattr(module, name, func)
+    # Patch utils first, then each target module individually.  page_index.py
+    # and page_index_md.py both do `from .utils import *`, which copies the
+    # function references into their own namespaces at import time, so patching
+    # utils alone is not sufficient.
+    for mod in (pageindex_utils_module, *target_modules):
+        mod.llm_completion = llm_completion
+        mod.llm_acompletion = llm_acompletion
 
 
 def patch_pageindex_progress_hooks(

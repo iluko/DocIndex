@@ -196,20 +196,22 @@ def test_patch_pageindex_llm_helpers_uses_temperature_fallback(monkeypatch) -> N
 
     # Seed the namespace with the attributes the interface guard expects.
     pageindex_utils = SimpleNamespace(
-        ChatGPT_API_with_finish_reason=None,
-        ChatGPT_API=None,
-        ChatGPT_API_async=None,
+        llm_completion=None,
+        llm_acompletion=None,
     )
-    pageindex_module = SimpleNamespace(ChatGPT_API_async=None)
+    pageindex_module = SimpleNamespace(
+        llm_completion=None,
+        llm_acompletion=None,
+    )
 
     utils.patch_pageindex_llm_helpers(pageindex_utils, pageindex_module)
 
-    assert pageindex_utils.ChatGPT_API("custom-azure-deployment", "prompt") == "ok"
+    assert pageindex_utils.llm_completion("custom-azure-deployment", "prompt") == "ok"
     assert "temperature" in sync_calls[0]
     assert "temperature" not in sync_calls[1]
 
     async_result = asyncio.run(
-        pageindex_module.ChatGPT_API_async("custom-azure-deployment", "prompt")
+        pageindex_module.llm_acompletion("custom-azure-deployment", "prompt")
     )
     assert async_result == "ok"
     assert "temperature" in async_calls[0]

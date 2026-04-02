@@ -14,7 +14,7 @@ import streamlit as st
 from dotenv import load_dotenv
 
 from ingestion.ingest import IngestionResult, ingest_document_with_trace
-from index_registry import DEFAULT_PROJECT, IndexContext, build_runtime_components, list_projects
+from index_registry import DEFAULT_PROJECT, IndexContext, build_runtime_components, delete_project, list_projects
 from model_registry import ModelRegistry
 from retrieval.query_engine import QueryResult, SourceReference, query
 from utils import REASONING_EFFORT_OPTIONS, detect_llm_provider, get_default_model, validate_doc_id
@@ -283,6 +283,27 @@ def render_sidebar(
         if create_submitted and new_project_name.strip():
             st.session_state["project_name"] = new_project_name.strip()
             st.rerun()
+
+    with st.sidebar.expander("Delete project"):
+        st.caption(
+            f"This will permanently remove **{project}** and all its indexed "
+            "documents. This cannot be undone."
+        )
+        with st.form("delete_project_form", clear_on_submit=True):
+            confirmed = st.checkbox(
+                f'Yes, permanently delete "{project}"',
+                key="delete_project_confirm",
+            )
+            delete_submitted = st.form_submit_button(
+                "Delete project", use_container_width=True, type="primary"
+            )
+        if delete_submitted:
+            if not confirmed:
+                st.sidebar.error("Check the confirmation box first.")
+            else:
+                delete_project(DATA_DIR, project)
+                st.session_state["project_name"] = DEFAULT_PROJECT
+                st.rerun()
 
     st.sidebar.markdown("## Model")
 

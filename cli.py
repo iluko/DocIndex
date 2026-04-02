@@ -14,7 +14,7 @@ from rich.panel import Panel
 from rich.table import Table
 
 from ingestion.ingest import ingest_document
-from index_registry import build_runtime_components
+from index_registry import build_runtime_components, delete_project, list_projects
 from retrieval.query_engine import query as run_query
 from utils import REASONING_EFFORT_OPTIONS, get_default_model, normalize_reasoning_effort, validate_doc_id
 
@@ -319,6 +319,35 @@ def delete_doc_command(doc_id: str, model: str, confirmed: bool, project: str | 
     console.print(f"Deleting '{doc_id}' from project: {runtime.index_context.project}")
     _delete_document(runtime, doc_id)
     console.print(f"[green]Deleted '{doc_id}' successfully.[/green]")
+
+
+@cli.command("delete-project")
+@click.argument("project_name")
+@click.option("--yes", "confirmed", is_flag=True, default=False,
+              help="Skip the confirmation prompt.")
+def delete_project_command(project_name: str, confirmed: bool) -> None:
+    """Permanently delete PROJECT_NAME and all its indexed documents.
+
+    Removes every artifact stored for the project — master tree, doc trees,
+    source registry, and derived markdown.  This cannot be undone; documents
+    must be re-ingested to restore them.
+    """
+    existing = list_projects(DATA_DIR)
+    if project_name not in existing:
+        raise click.ClickException(
+            f"Project '{project_name}' does not exist. "
+            f"Known projects: {existing}"
+        )
+
+    if not confirmed:
+        click.confirm(
+            f"Permanently delete project '{project_name}' and ALL its documents?",
+            abort=True,
+        )
+
+    console.print(f"Deleting project: [bold]{project_name}[/bold]")
+    delete_project(DATA_DIR, project_name)
+    console.print(f"[green]Project '{project_name}' deleted.[/green]")
 
 
 @cli.command("reingest")

@@ -15,6 +15,8 @@ does NOT change which documents are visible — only the project does that.
 from __future__ import annotations
 
 import json
+import os
+import shutil
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -171,3 +173,27 @@ def build_runtime_components(
         storage=create_document_store(str(context.index_dir), context.project),
         arch_map=ArchitectureMap(str(context.arch_map_path)),
     )
+
+
+def delete_project(base_data_dir: str | Path, project: str) -> None:
+    """Permanently delete all artifacts for one project.
+
+    For the local backend this removes the entire ``data/indexes/{project}/``
+    directory in one shot.  For MongoDB it deletes every document scoped to
+    the project across all collections (doc_trees, doc_sources,
+    derived_markdown, master_trees).
+
+    The function is intentionally not called through ``build_runtime_components``
+    so that it never creates directories before deleting them.
+    """
+    context = resolve_index_context(base_data_dir, project=project)
+    backend = os.environ.get("STORAGE_BACKEND", "local").lower()
+
+    if backend == "mongodb":
+        from master_tree.mongo_master_tree import MongoMasterTreeStore
+        from storage.mongo_store import MongoDocumentStore
+        MongoDocumentStore(project=context.project).delete_all()
+        MongoMasterTreeStore(project=context.project).delete_all()
+    else:
+        if context.index_dir.exists():
+            shutil.rmtree(context.index_dir)

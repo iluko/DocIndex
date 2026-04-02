@@ -116,3 +116,10 @@ class MongoDocumentStore(AbstractDocumentStore):
 
     def delete_derived_markdown(self, doc_id: str) -> bool:
         return self._markdown.delete_one(self._key(doc_id)).deleted_count > 0
+
+    def delete_all(self) -> None:
+        """Remove every stored artifact for this project from all collections."""
+        project_filter = {"project": self._project}
+        self._trees.delete_many(project_filter)
+        self._sources.delete_many(project_filter)
+        self._markdown.delete_many(project_filter)

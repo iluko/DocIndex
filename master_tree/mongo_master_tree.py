@@ -92,6 +92,10 @@ class MongoMasterTreeStore:
         self.tree = MasterTreeModel(version=self.tree.version, docs=docs)
         return True
 
+    def delete_all(self) -> None:
+        """Remove this project's master tree document from the collection."""
+        self._col.delete_one(self._filter())
+
     def to_llm_context(self) -> str:
         routing_docs = []
         for doc in self.tree.docs:
