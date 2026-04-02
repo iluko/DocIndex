@@ -17,7 +17,14 @@ from ingestion.ingest import IngestionResult, ingest_document_with_trace
 from index_registry import DEFAULT_PROJECT, IndexContext, build_runtime_components, delete_project, list_projects
 from model_registry import ModelRegistry
 from retrieval.query_engine import QueryResult, SourceReference, query
-from utils import REASONING_EFFORT_OPTIONS, detect_llm_provider, get_default_model, validate_doc_id
+from utils import (
+    REASONING_EFFORT_OPTIONS,
+    detect_llm_provider,
+    get_default_model,
+    get_master_top_sections_range,
+    get_master_top_sections_target,
+    validate_doc_id,
+)
 
 load_dotenv()
 
@@ -445,12 +452,19 @@ def create_ingestion_progress_renderer(status):
                 text=f"Generating node summaries: 0/{total}" if total else "Generating node summaries...",
             )
             summary_caption.caption("PageIndex is generating summaries for the tree nodes.")
-            status.update(label="Generating node summaries", state="running")
+            status.update(label="Generating node summaries", state="running", expanded=True)
+        elif event_type == "pageindex_summary_node_started":
+            total = int(event.get("total_nodes", state["summary_total"]) or 0)
+            started = int(event.get("started_nodes", 0) or 0)
+            title = str(event.get("title") or "Untitled section")
+            state["summary_total"] = max(state["summary_total"], total)
+            summary_caption.caption(f"Currently summarizing node {started}/{total}: {title}" if total else f"Currently summarizing: {title}")
         elif event_type == "pageindex_summary_node_completed":
             total = int(event.get("total_nodes", state["summary_total"]) or 0)
             completed = int(event.get("completed_nodes", 0) or 0)
             title = str(event.get("title") or "Untitled section")
-            state["summary_total"] = total
+            display_total = max(state["summary_total"], total, completed)
+            state["summary_total"] = display_total
             state["summary_completed"] = completed
             state["total_input_tokens"] = int(event.get("total_input_tokens", 0) or 0)
             state["total_output_tokens"] = int(event.get("total_output_tokens", 0) or 0)
@@ -463,32 +477,32 @@ def create_ingestion_progress_renderer(status):
                     "total_tokens": int(event.get("estimated_total_tokens", 0) or 0),
                 }
             )
-            ratio = (completed / total) if total else 0.0
+            ratio = (completed / display_total) if display_total else 0.0
             summary_bar.progress(
                 min(1.0, ratio),
-                text=f"Generating node summaries: {completed}/{total}" if total else "Generating node summaries...",
+                text=f"Generating node summaries: {completed}/{display_total}" if display_total else "Generating node summaries...",
             )
             summary_caption.caption(f"Latest completed node: {title}")
-            status.update(label=f"Generating node summaries ({completed}/{total})", state="running")
         elif event_type == "pageindex_summary_batch_completed":
             total = int(event.get("total_nodes", state["summary_total"]) or 0)
             completed = int(event.get("completed_nodes", total) or total)
+            display_total = max(state["summary_total"], total, completed)
             state["total_input_tokens"] = int(event.get("total_input_tokens", 0) or 0)
             state["total_output_tokens"] = int(event.get("total_output_tokens", 0) or 0)
-            if total:
-                summary_bar.progress(1.0, text=f"Generating node summaries: {completed}/{total}")
+            if display_total:
+                summary_bar.progress(1.0, text=f"Generating node summaries: {completed}/{display_total}")
             summary_caption.caption("Node-summary generation finished.")
-            status.update(label="Finishing PageIndex tree build", state="running")
+            status.update(label="Finishing PageIndex tree build", state="running", expanded=True)
         elif event_type == "pageindex_started":
-            status.update(label="Building PageIndex tree", state="running")
+            status.update(label="Building PageIndex tree", state="running", expanded=True)
         elif event_type == "master_node_started":
-            status.update(label="Generating master node", state="running")
+            status.update(label="Generating master node", state="running", expanded=True)
         elif event_type == "ingestion_step" and step_name == "persist_tree":
-            status.update(label="Saving tree artifacts", state="running")
+            status.update(label="Saving tree artifacts", state="running", expanded=True)
         elif event_type == "ingestion_step" and step_name == "build_pageindex_tree":
-            status.update(label="PageIndex tree ready", state="running")
+            status.update(label="PageIndex tree ready", state="running", expanded=True)
         elif event_type == "ingestion_complete":
-            status.update(label="Ingestion complete", state="complete")
+            status.update(label="Ingestion complete", state="complete", expanded=True)
 
         _render_token_metrics()
         _render_recent_events()
@@ -789,6 +803,23 @@ def main() -> None:
             doc_id = st.text_input("Document ID", value=default_doc_id)
             doc_title = st.text_input("Title")
             doc_type = st.text_input("Document Type", value="technical_spec")
+            default_top_sections_target = get_master_top_sections_target()
+            with st.expander("Advanced ingestion options", expanded=False):
+                top_sections_target = st.number_input(
+                    "Master top-sections target",
+                    min_value=1,
+                    max_value=12,
+                    value=default_top_sections_target,
+                    step=1,
+                    help="Ingestion-only. Stored master-node top sections will be generated with a target-centered range.",
+                )
+                min_sections, max_sections = get_master_top_sections_range(
+                    int(top_sections_target)
+                )
+                st.caption(
+                    f"Current prompt range: `{min_sections}-{max_sections}` sections. "
+                    "Higher values improve routing detail but increase master-tree prompt size."
+                )
 
             if st.button("Run Ingestion", use_container_width=True):
                 if uploaded_file is None:
@@ -814,6 +845,7 @@ def main() -> None:
                                     master_tree_store=runtime.master_tree_store,
                                     storage=runtime.storage,
                                     model=model,
+                                    top_sections_target=int(top_sections_target),
                                     progress_callback=progress_callback,
                                 ),
                                 on_progress=progress_handler,
@@ -863,7 +895,7 @@ def main() -> None:
                             storage=runtime.storage,
                             arch_map=runtime.arch_map,
                             model=model,
-                            chat_history=_current_history,
+                            conversation_context=_current_history,
                             max_docs=max_docs,
                             verbose=False,
                             reasoning_effort=reasoning_effort,
@@ -905,7 +937,10 @@ def main() -> None:
             if not _ok:
                 raise _payload
             result = _payload
-            st.session_state.chat_history = result.chat_history_updated
+            st.session_state.chat_history = _current_history + [
+                {"role": "user", "content": prompt},
+                {"role": "assistant", "content": result.answer},
+            ]
             st.session_state.latest_query = result
             st.rerun()
 

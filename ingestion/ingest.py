@@ -22,6 +22,8 @@ from utils import (
     ensure_pageindex_environment,
     ensure_tiktoken_model_aliases,
     get_default_model,
+    get_master_top_sections_range,
+    get_master_top_sections_target,
     INGESTION_REASONING_EFFORT,
     iter_tree_nodes,
     patch_pageindex_llm_helpers,
@@ -258,6 +260,7 @@ async def _ingest_document_impl(
     storage: DocumentStore,
     model: str | None = None,
     pageindex_opts: dict | None = None,
+    top_sections_target: int | None = None,
     progress_callback: Callable[[dict], None] | None = None,
 ) -> IngestionResult:
     """Shared implementation behind both simple and traced ingestion APIs."""
@@ -266,6 +269,8 @@ async def _ingest_document_impl(
         # emit live updates without threading `progress_callback` through every
         # helper function in the stack.
         model = model or get_default_model()
+        resolved_top_sections_target = get_master_top_sections_target(top_sections_target)
+        top_sections_range = get_master_top_sections_range(resolved_top_sections_target)
         path = Path(file_path).expanduser().resolve()
         trace = IngestionTrace(
             doc_id=doc_id,
@@ -283,6 +288,8 @@ async def _ingest_document_impl(
                 "model": model,
                 "provider": detect_llm_provider(),
                 "ingestion_reasoning_effort": INGESTION_REASONING_EFFORT,
+                "master_top_sections_target": resolved_top_sections_target,
+                "master_top_sections_range": list(top_sections_range),
                 "pageindex_overrides": pageindex_opts or {},
             },
         )
@@ -357,6 +364,7 @@ async def _ingest_document_impl(
             per_doc_tree=per_doc_tree,
             existing_master_tree=existing_master_tree,
             model=model,
+            top_sections_target=resolved_top_sections_target,
         )
 
         _append_trace(
@@ -409,6 +417,7 @@ async def ingest_document(
     storage: DocumentStore,
     model: str | None = None,
     pageindex_opts: dict | None = None,
+    top_sections_target: int | None = None,
     progress_callback: Callable[[dict], None] | None = None,
 ) -> MasterNode:
     """Ingest one document and return only the master-tree node."""
@@ -421,6 +430,7 @@ async def ingest_document(
         storage=storage,
         model=model,
         pageindex_opts=pageindex_opts,
+        top_sections_target=top_sections_target,
         progress_callback=progress_callback,
     )
     return result.master_node
@@ -435,6 +445,7 @@ async def ingest_document_with_trace(
     storage: DocumentStore,
     model: str | None = None,
     pageindex_opts: dict | None = None,
+    top_sections_target: int | None = None,
     progress_callback: Callable[[dict], None] | None = None,
 ) -> IngestionResult:
     """Ingest one document and return the tree plus a detailed trace."""
@@ -447,5 +458,6 @@ async def ingest_document_with_trace(
         storage=storage,
         model=model,
         pageindex_opts=pageindex_opts,
+        top_sections_target=top_sections_target,
         progress_callback=progress_callback,
     )

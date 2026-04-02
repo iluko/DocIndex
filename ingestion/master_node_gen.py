@@ -17,6 +17,8 @@ from utils import (
     get_async_client,
     INGESTION_REASONING_EFFORT,
     iter_tree_nodes,
+    get_master_top_sections_range,
+    get_master_top_sections_target,
     parse_json_response,
     strip_text_fields,
 )
@@ -81,15 +83,21 @@ def _existing_doc_ids(existing_master_tree: str) -> set[str]:
     return {str(doc.get("doc_id")) for doc in docs if doc.get("doc_id")}
 
 
-def _fallback_top_sections(doc_id: str, per_doc_tree: dict) -> list[TopSection]:
+def _fallback_top_sections(
+    doc_id: str,
+    per_doc_tree: dict,
+    *,
+    top_sections_target: int,
+) -> list[TopSection]:
     """Build a safe fallback when the LLM returns unusable top-section metadata."""
     fallback_sections: list[TopSection] = []
+    _, max_sections = get_master_top_sections_range(top_sections_target)
 
     top_level_nodes = per_doc_tree.get("nodes", [])
     if not top_level_nodes:
         top_level_nodes = list(iter_tree_nodes(per_doc_tree))
 
-    for node in top_level_nodes[:5]:
+    for node in top_level_nodes[:max_sections]:
         node_id = node.get("node_id")
         if not node_id:
             continue
@@ -102,17 +110,22 @@ def _fallback_top_sections(doc_id: str, per_doc_tree: dict) -> list[TopSection]:
             )
         )
 
-    return fallback_sections[:5]
+    return fallback_sections[:max_sections]
 
 
 def _normalize_top_sections(
-    doc_id: str, per_doc_tree: dict, top_sections_payload: list[dict]
+    doc_id: str,
+    per_doc_tree: dict,
+    top_sections_payload: list[dict],
+    *,
+    top_sections_target: int,
 ) -> list[TopSection]:
     """Validate LLM-selected sections against the actual PageIndex node ids."""
     valid_node_ids = collect_node_ids(per_doc_tree)
     normalized: list[TopSection] = []
+    _, max_sections = get_master_top_sections_range(top_sections_target)
 
-    for section in top_sections_payload[:5]:
+    for section in top_sections_payload[:max_sections]:
         raw_node_ref = str(section.get("node_ref", "")).strip()
         node_id = raw_node_ref.split("::", 1)[-1] if raw_node_ref else ""
         if node_id not in valid_node_ids:
@@ -128,7 +141,11 @@ def _normalize_top_sections(
             )
         )
 
-    return normalized or _fallback_top_sections(doc_id, per_doc_tree)
+    return normalized or _fallback_top_sections(
+        doc_id,
+        per_doc_tree,
+        top_sections_target=top_sections_target,
+    )
 
 
 async def generate_master_node(
@@ -140,6 +157,7 @@ async def generate_master_node(
     per_doc_tree: dict,
     existing_master_tree: str,
     model: str | None = None,
+    top_sections_target: int | None = None,
 ) -> MasterNode:
     """Create a `MasterNode` from a document tree plus existing corpus context.
 
@@ -148,6 +166,10 @@ async def generate_master_node(
     output because LLMs are not guaranteed to follow instructions perfectly.
     """
     model = model or get_default_model()
+    top_sections_target = get_master_top_sections_target(top_sections_target)
+    min_top_sections, max_top_sections = get_master_top_sections_range(
+        top_sections_target
+    )
     per_doc_tree_json = json.dumps(
         strip_text_fields(per_doc_tree), indent=2, ensure_ascii=False
     )
@@ -178,7 +200,7 @@ Instructions:
    domain tags that describe what this document relates to. These should be specific
    enough for a router to distinguish this document from others (e.g. "authentication",
    "error handling", "data pipeline", "compliance", "pricing model").
-6. For top_sections, select the 4-6 sections from the PageIndex tree that are most
+6. For top_sections, select between {min_top_sections} and {max_top_sections} sections from the PageIndex tree that are most
    useful for routing. Each node_ref must be "{doc_id}::<node_id>" using the exact
    node_id from the tree.
 7. For related_docs, list doc_ids from the existing master tree that are meaningfully
@@ -224,7 +246,10 @@ Output only the JSON object. No markdown. No explanation.
                     ),
                 ),
                 top_sections=_normalize_top_sections(
-                    doc_id, per_doc_tree, payload.get("top_sections", [])
+                    doc_id,
+                    per_doc_tree,
+                    payload.get("top_sections", []),
+                    top_sections_target=top_sections_target,
                 ),
                 related_docs=related_docs,
                 ingested_at=datetime.utcnow().isoformat(),

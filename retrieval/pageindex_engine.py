@@ -26,13 +26,14 @@ from master_tree.master_tree import MasterTreeStore
 from retrieval.fetcher import _build_retrieved_chunk, _split_node_ref
 from storage.store import DocumentStore
 from utils import (
+    ConversationContext,
     collect_node_ids,
     create_chat_completion_async,
     extract_llm_text,
-    format_chat_history,
     get_async_client,
     get_default_model,
     iter_tree_nodes,
+    render_conversation_context,
     strip_text_fields,
 )
 
@@ -273,7 +274,7 @@ async def run_pageindex_retrieval(
     storage: DocumentStore,
     arch_map: ArchitectureMap,
     model: str | None = None,
-    chat_history: list[dict] | None = None,
+    conversation_context: ConversationContext = None,
     reasoning_effort: str | None = None,
     max_tool_calls: int = 12,
     model_max_tokens: int = 100000,
@@ -291,12 +292,10 @@ async def run_pageindex_retrieval(
     """
     model = model or get_default_model()
     client = get_async_client()
-    history = list(chat_history or [])
-
     doc_block = _doc_summary_block(selected_doc_ids, master_tree_store)
     arch_context = arch_map.to_llm_context()
     arch_block = f"\nDomain context:\n{arch_context}" if arch_context else ""
-    chat_block = format_chat_history(history)
+    conversation_block = render_conversation_context(conversation_context)
 
     system_prompt = f"""
 You are a document Q&A assistant. You have access to the following documents:
@@ -320,7 +319,7 @@ contain enough information, say so clearly.
     state.content_token_budget = int(model_max_tokens * 0.7)
     state.messages = [
         {"role": "system", "content": system_prompt},
-        {"role": "user", "content": f"{user_query}\n\n{chat_block}".strip()},
+        {"role": "user", "content": f"{user_query}\n\n{conversation_block}".strip()},
     ]
 
     final_answer = ""

@@ -16,7 +16,13 @@ from rich.table import Table
 from ingestion.ingest import ingest_document
 from index_registry import build_runtime_components, delete_project, list_projects
 from retrieval.query_engine import query as run_query
-from utils import REASONING_EFFORT_OPTIONS, get_default_model, normalize_reasoning_effort, validate_doc_id
+from utils import (
+    REASONING_EFFORT_OPTIONS,
+    get_default_model,
+    get_master_top_sections_target,
+    normalize_reasoning_effort,
+    validate_doc_id,
+)
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -118,6 +124,7 @@ def init_command() -> None:
             f"AZURE_OPENAI_CHAT_DEPLOYMENT=\n"
             f"\n"
             f"CHATGPT_API_KEY={api_key}\n"
+            f"MASTER_TOP_SECTIONS_TARGET={get_master_top_sections_target()}\n"
         )
     else:
         content = (
@@ -139,6 +146,7 @@ def init_command() -> None:
             f"AZURE_OPENAI_CHAT_DEPLOYMENT={model}\n"
             f"\n"
             f"CHATGPT_API_KEY={api_key}\n"
+            f"MASTER_TOP_SECTIONS_TARGET={get_master_top_sections_target()}\n"
         )
 
     env_path.write_text(content, encoding="utf-8")
@@ -151,8 +159,23 @@ def init_command() -> None:
 @click.option("--title", "doc_title", required=True)
 @click.option("--doc-type", required=True)
 @click.option("--model", default=DEFAULT_MODEL, show_default=True)
+@click.option(
+    "--top-sections-target",
+    default=get_master_top_sections_target(),
+    show_default=True,
+    type=click.IntRange(1, 12),
+    help="Ingestion-only target for stored master-tree top sections. Prompt range becomes target-1 to target+1. Higher values improve routing detail but increase master-tree prompt size.",
+)
 @click.option("--project", default=None, help="Optional project namespace for index isolation.")
-def ingest(file_path: Path, doc_id: str, doc_title: str, doc_type: str, model: str, project: str | None) -> None:
+def ingest(
+    file_path: Path,
+    doc_id: str,
+    doc_title: str,
+    doc_type: str,
+    model: str,
+    top_sections_target: int,
+    project: str | None,
+) -> None:
     """Ingest one source document into the active project index."""
     try:
         validate_doc_id(doc_id)
@@ -168,6 +191,7 @@ def ingest(file_path: Path, doc_id: str, doc_title: str, doc_type: str, model: s
             master_tree_store=runtime.master_tree_store,
             storage=runtime.storage,
             model=model,
+            top_sections_target=top_sections_target,
         )
     )
     console.print(f"Project: {runtime.index_context.project}  |  Model: {model}")
@@ -220,7 +244,7 @@ def query_command(
                 storage=runtime.storage,
                 arch_map=runtime.arch_map,
                 model=model,
-                chat_history=chat_history,
+                conversation_context=chat_history,
                 max_docs=max_docs,
                 verbose=verbose,
                 reasoning_effort=normalize_reasoning_effort(reasoning_effort),
@@ -260,7 +284,10 @@ def query_command(
                 for src in result.sources:
                     console.print(f"  [{src.doc_id}] {src.section} (p.{src.page_range})")
 
-        chat_history = result.chat_history_updated
+        chat_history = chat_history + [
+            {"role": "user", "content": current_query},
+            {"role": "assistant", "content": result.answer},
+        ]
         follow_up = console.input("Follow-up (or 'exit'): ").strip()
         if follow_up.lower() == "exit":
             break
@@ -375,6 +402,13 @@ def delete_project_command(project_name: str, confirmed: bool) -> None:
 @click.option("--title", "doc_title", required=True)
 @click.option("--doc-type", required=True)
 @click.option("--model", default=DEFAULT_MODEL, show_default=True)
+@click.option(
+    "--top-sections-target",
+    default=get_master_top_sections_target(),
+    show_default=True,
+    type=click.IntRange(1, 12),
+    help="Ingestion-only target for stored master-tree top sections. Higher values improve routing detail but increase master-tree prompt size.",
+)
 @click.option("--yes", "confirmed", is_flag=True, default=False,
               help="Skip the confirmation prompt when a previous version exists.")
 @click.option("--project", default=None, help="Optional project namespace for index isolation.")
@@ -384,6 +418,7 @@ def reingest_command(
     doc_title: str,
     doc_type: str,
     model: str,
+    top_sections_target: int,
     confirmed: bool,
     project: str | None,
 ) -> None:
@@ -422,6 +457,7 @@ def reingest_command(
             master_tree_store=runtime.master_tree_store,
             storage=runtime.storage,
             model=model,
+            top_sections_target=top_sections_target,
         )
     )
     console.print(f"[green]Reingest complete:[/green] {doc_id}")

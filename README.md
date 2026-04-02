@@ -123,6 +123,11 @@ OPENAI_MODEL=gpt-4o-2024-11-20
 # e.g. "Acme Legal Docs", "Product Engineering Wiki", "HR Policy Hub"
 DOMAIN_NAME=
 
+# Ingestion-only: target number of stored master-node top sections.
+# The prompt range becomes target-1 to target+1, capped at 12.
+# Higher values improve routing detail but increase master-tree prompt size.
+MASTER_TOP_SECTIONS_TARGET=4
+
 # Retrieval pipeline: "hybrid" (default) or "pageindex"
 RETRIEVAL_MODE=hybrid
 
@@ -205,6 +210,7 @@ streamlit run app.py
 
 The UI provides:
 - Document upload and ingestion with live step-by-step progress
+- Advanced ingestion controls such as the master top-sections target
 - Interactive Q&A with full trace inspection
 - View of routing decisions, selected nodes, fetched chunks, and retrieved context
 
@@ -215,6 +221,10 @@ The UI provides:
 ```bash
 # Ingest
 python cli.py ingest --file doc.pdf --doc-id my_doc --title "Title" --doc-type spec
+
+# Ingest with a higher top-section target (prompt range becomes 4-6)
+python cli.py ingest --file doc.pdf --doc-id my_doc --title "Title" --doc-type spec \
+  --top-sections-target 5
 
 # See what's indexed
 python cli.py list-docs
@@ -350,6 +360,7 @@ Every `QueryResult` carries a `trace` object for full observability:
 | `AZURE_OPENAI_CHAT_DEPLOYMENT` | — | Azure deployment name |
 | `CHATGPT_API_KEY` | *(auto-filled)* | PageIndex key; auto-filled from Azure key in Azure mode |
 | `DOMAIN_NAME` | *(blank)* | Name shown in answer prompt, e.g. `"Acme Docs"` |
+| `MASTER_TOP_SECTIONS_TARGET` | `4` | Ingestion-only target for stored master-node top sections. Prompt range becomes target-1 to target+1, capped at 12. Higher values improve routing detail but increase prompt size. |
 | `RETRIEVAL_MODE` | `hybrid` | `hybrid` or `pageindex` |
 | `NAVIGATOR_VERIFICATION` | `false` | `true` to enable post-navigation self-correction pass |
 | `STORAGE_BACKEND` | `local` | `local` (filesystem) or `mongodb` |

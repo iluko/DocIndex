@@ -42,6 +42,7 @@ def test_ingest_document_saves_tree_and_updates_master_tree(
         assert kwargs["doc_id"] == "sip_auth_spec_v2"
         assert kwargs["per_doc_tree"] == sample_tree
         assert kwargs["tree_path"].endswith("sip_auth_spec_v2_tree.json")
+        assert kwargs["top_sections_target"] == 5
         return MasterNode(
             doc_id="sip_auth_spec_v2",
             doc_title="SIP Auth Spec",
@@ -79,6 +80,7 @@ def test_ingest_document_saves_tree_and_updates_master_tree(
             storage=storage,
             model="test-model",
             pageindex_opts={"max_page_num_each_node": 5},
+            top_sections_target=5,
         )
     )
 

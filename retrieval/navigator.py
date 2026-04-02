@@ -7,14 +7,15 @@ import logging
 from dotenv import load_dotenv
 
 from utils import (
+    ConversationContext,
     collect_node_ids,
     create_chat_completion_async,
     extract_llm_text,
-    format_chat_history,
     get_async_client,
     get_default_model,
     iter_tree_nodes,
     parse_json_response,
+    render_conversation_context,
 )
 
 load_dotenv()
@@ -79,7 +80,7 @@ async def navigate_doc_tree(
     doc_id: str,
     per_doc_tree: dict,
     model: str | None = None,
-    chat_history: list[dict] | None = None,
+    conversation_context: ConversationContext = None,
     reasoning_effort: str | None = None,
 ) -> list[str]:
     """Select the most relevant node refs inside one per-document PageIndex tree.
@@ -93,7 +94,7 @@ async def navigate_doc_tree(
     if not valid_node_ids:
         return []
 
-    chat_history_block = format_chat_history(chat_history)
+    conversation_block = render_conversation_context(conversation_context)
     node_list = _format_tree_for_navigation(per_doc_tree)
 
     system_prompt = """
@@ -111,7 +112,7 @@ If no node is relevant, return an empty array: []
 Document: {doc_id}
 Query: {query}
 
-{chat_history_block}
+{conversation_block}
 
 Document sections:
 {node_list}

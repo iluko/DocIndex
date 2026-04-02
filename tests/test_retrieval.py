@@ -91,10 +91,10 @@ def test_navigator_returns_compound_node_refs(tmp_path: Path, monkeypatch) -> No
     assert node_refs == ["auth_doc::0002", "auth_doc::0001"]
 
 
-def test_query_sequences_router_navigator_fetch_and_history(
+def test_query_sequences_router_navigator_fetch_and_context(
     tmp_path: Path, monkeypatch
 ) -> None:
-    """The high-level query engine should preserve the route->fetch->answer flow."""
+    """The query engine should consume caller context without owning history state."""
     master_tree_store = MasterTreeStore(str(tmp_path / "master_tree.json"))
     storage = DocumentStore(str(tmp_path / "data"))
     arch_map_path = tmp_path / "arch_map.json"
@@ -189,7 +189,7 @@ def test_query_sequences_router_navigator_fetch_and_history(
             master_tree_store=master_tree_store,
             storage=storage,
             arch_map=arch_map,
-            chat_history=[{"role": "user", "content": "Earlier question"}],
+            conversation_context=[{"role": "user", "content": "Earlier question"}],
             reasoning_effort="high",
         )
     )
@@ -204,6 +204,7 @@ def test_query_sequences_router_navigator_fetch_and_history(
     assert result.metrics is not None
     assert result.metrics.ttft_seconds >= 0
     assert result.metrics.total_time_seconds >= 0
+    assert not hasattr(result, "chat_history_updated")
     assert result.trace.navigation == {
         "auth_doc": ["auth_doc::0002"],
         "rbac_doc": ["rbac_doc::0002"],
@@ -211,10 +212,6 @@ def test_query_sequences_router_navigator_fetch_and_history(
     assert [chunk.node_ref for chunk in result.trace.fetched_chunks] == [
         "auth_doc::0002",
         "rbac_doc::0002",
-    ]
-    assert result.chat_history_updated[-2:] == [
-        {"role": "user", "content": "What is the token refresh flow?"},
-        {"role": "assistant", "content": "The refresh flow is documented in the auth spec."},
     ]
 
 

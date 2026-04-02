@@ -41,10 +41,10 @@ from retrieval.router import route_query, route_query_broadened
 from retrieval.verifier import verify_navigation_batch
 from storage.store import DocumentStore
 from utils import (
+    ConversationContext,
     create_chat_completion_async,
     extract_usage,
     extract_llm_text,
-    format_chat_history,
     get_async_client,
     get_default_model,
     get_domain_name,
@@ -58,6 +58,7 @@ from utils import (
     model_supports_explicit_temperature,
     normalize_reasoning_effort,
     record_llm_usage,
+    render_conversation_context,
 )
 
 load_dotenv()
@@ -95,13 +96,12 @@ class SourceReference:
 
 @dataclass
 class QueryResult:
-    """Full query result, including answer text and trace/debug information."""
+    """Full query result, excluding any caller-owned conversation/session state."""
 
     answer: str
     selected_docs: list[str]
     selected_nodes: list[str]
     retrieved_context: str
-    chat_history_updated: list[dict]
     trace: QueryTrace | None = None
     sources: list[SourceReference] = field(default_factory=list)
     metrics: QueryMetrics | None = None
@@ -269,7 +269,7 @@ def _build_answer_system_prompt(
 async def _navigate_with_fallback(
     user_query: str,
     doc_id: str,
-    history: list[dict],
+    conversation_context: ConversationContext,
     master_tree_store: MasterTreeStore,
     storage: DocumentStore,
     model: str,
@@ -282,7 +282,7 @@ async def _navigate_with_fallback(
         doc_id=doc_id,
         per_doc_tree=tree,
         model=model,
-        chat_history=history,
+        conversation_context=conversation_context,
         reasoning_effort=reasoning_effort,
     )
 
@@ -302,7 +302,7 @@ async def _navigate_with_fallback(
 
 async def _run_hybrid(
     user_query: str,
-    history: list[dict],
+    conversation_context: ConversationContext,
     selected_doc_ids: list[str],
     routing_broadened: bool,
     master_tree_store: MasterTreeStore,
@@ -330,7 +330,7 @@ async def _run_hybrid(
             _navigate_with_fallback(
                 user_query=user_query,
                 doc_id=doc_id,
-                history=history,
+                conversation_context=conversation_context,
                 master_tree_store=master_tree_store,
                 storage=storage,
                 model=model,
@@ -375,7 +375,7 @@ async def _run_hybrid(
     fetch_result = await fetch_multiple_nodes_detailed(selected_nodes, storage)
     retrieved_context = fetch_result.combined_text
     arch_map_context = arch_map.to_llm_context()
-    chat_history_block = format_chat_history(history)
+    conversation_block = render_conversation_context(conversation_context)
 
     # ── Step 4: Answer ────────────────────────────────────────────────────────
     system_prompt = _build_answer_system_prompt(
@@ -384,7 +384,7 @@ async def _run_hybrid(
         truncated=fetch_result.truncated,
         routing_broadened=routing_broadened,
     )
-    user_prompt = f"{user_query}\n\n{chat_history_block}".strip()
+    user_prompt = f"{user_query}\n\n{conversation_block}".strip()
 
     if answer_token_callback is not None:
         answer = await _answer_query_streaming(
@@ -410,7 +410,7 @@ async def _run_hybrid(
 
 async def _run_pageindex_mode(
     user_query: str,
-    history: list[dict],
+    conversation_context: ConversationContext,
     selected_doc_ids: list[str],
     master_tree_store: MasterTreeStore,
     storage: DocumentStore,
@@ -427,7 +427,7 @@ async def _run_pageindex_mode(
         storage=storage,
         arch_map=arch_map,
         model=model,
-        chat_history=history,
+        conversation_context=conversation_context,
         reasoning_effort=reasoning_effort,
     )
 
@@ -477,7 +477,7 @@ async def query(
     storage: DocumentStore,
     arch_map: ArchitectureMap,
     model: str | None = None,
-    chat_history: list[dict] | None = None,
+    conversation_context: ConversationContext = None,
     max_docs: int = 3,
     verbose: bool = False,
     reasoning_effort: str | None = None,
@@ -490,9 +490,15 @@ async def query(
     - ``pageindex`` — agentic tool-use loop.
 
     Both modes share the same router, including the broadened-fallback pass.
+
+    The caller may optionally pass ``conversation_context`` as either:
+    - a pre-formatted string summary/block, or
+    - a list of prior chat turns for convenience.
+
+    The query engine consumes that context but does not mutate, persist, or
+    return conversation state.
     """
     model = model or get_default_model()
-    history = list(chat_history or [])
     retrieval_mode = get_retrieval_mode()
     query_started_at = time.perf_counter()
     first_token_elapsed: float | None = None
@@ -513,7 +519,7 @@ async def query(
             arch_map=arch_map,
             model=model,
             max_docs=max_docs,
-            chat_history=history,
+            conversation_context=conversation_context,
             reasoning_effort=reasoning_effort,
         )
 
@@ -526,7 +532,7 @@ async def query(
                 arch_map=arch_map,
                 model=model,
                 max_docs=max_docs,
-                chat_history=history,
+                conversation_context=conversation_context,
                 reasoning_effort=reasoning_effort,
             )
             if selected_doc_ids:
@@ -549,16 +555,11 @@ async def query(
                 "even after a broadened search. Please check that the relevant "
                 "documents have been ingested."
             )
-            updated_history = history + [
-                {"role": "user", "content": user_query},
-                {"role": "assistant", "content": answer},
-            ]
             return QueryResult(
                 answer=answer,
                 selected_docs=[],
                 selected_nodes=[],
                 retrieved_context="",
-                chat_history_updated=updated_history,
                 sources=[],
                 trace=QueryTrace(
                     routed_docs=[],
@@ -581,7 +582,7 @@ async def query(
             answer, selected_nodes, navigation_map, retrieved_context = (
                 await _run_pageindex_mode(
                     user_query=user_query,
-                    history=history,
+                    conversation_context=conversation_context,
                     selected_doc_ids=selected_doc_ids,
                     master_tree_store=master_tree_store,
                     storage=storage,
@@ -591,16 +592,11 @@ async def query(
                     reasoning_effort=reasoning_effort,
                 )
             )
-            updated_history = history + [
-                {"role": "user", "content": user_query},
-                {"role": "assistant", "content": answer},
-            ]
             return QueryResult(
                 answer=answer,
                 selected_docs=selected_doc_ids,
                 selected_nodes=selected_nodes,
                 retrieved_context=retrieved_context,
-                chat_history_updated=updated_history,
                 sources=[],
                 trace=QueryTrace(
                     routed_docs=selected_doc_ids,
@@ -630,7 +626,7 @@ async def query(
             verification_applied,
         ) = await _run_hybrid(
             user_query=user_query,
-            history=history,
+            conversation_context=conversation_context,
             selected_doc_ids=selected_doc_ids,
             routing_broadened=routing_broadened,
             master_tree_store=master_tree_store,
@@ -653,17 +649,11 @@ async def query(
             )
             for chunk in chunks
         ]
-
-        updated_history = history + [
-            {"role": "user", "content": user_query},
-            {"role": "assistant", "content": answer},
-        ]
         return QueryResult(
             answer=answer,
             selected_docs=selected_doc_ids,
             selected_nodes=selected_nodes,
             retrieved_context=retrieved_context,
-            chat_history_updated=updated_history,
             sources=sources,
             trace=QueryTrace(
                 routed_docs=selected_doc_ids,

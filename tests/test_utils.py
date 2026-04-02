@@ -234,6 +234,37 @@ def test_create_chat_completion_estimates_usage_when_response_omits_it() -> None
     assert tracker.estimated_calls == 1
 
 
+def test_render_conversation_context_supports_string_and_turns() -> None:
+    """Conversation context may be either a raw string or a chat-turn list."""
+    rendered_string = utils.render_conversation_context("Prior summary here.")
+    assert rendered_string == "Prior summary here."
+
+    rendered_turns = utils.render_conversation_context(
+        [
+            {"role": "user", "content": "Question one"},
+            {"role": "assistant", "content": "Answer one"},
+        ]
+    )
+    assert "Prior conversation context:" in rendered_turns
+    assert "User: Question one" in rendered_turns
+    assert "Assistant: Answer one" in rendered_turns
+
+
+def test_master_top_sections_target_defaults_and_caps(monkeypatch) -> None:
+    """The ingestion top-section target should default to 4 and cap at 12."""
+    monkeypatch.delenv("MASTER_TOP_SECTIONS_TARGET", raising=False)
+    assert utils.get_master_top_sections_target() == 4
+    assert utils.get_master_top_sections_range() == (3, 5)
+
+    monkeypatch.setenv("MASTER_TOP_SECTIONS_TARGET", "5")
+    assert utils.get_master_top_sections_target() == 5
+    assert utils.get_master_top_sections_range() == (4, 6)
+
+    monkeypatch.setenv("MASTER_TOP_SECTIONS_TARGET", "99")
+    assert utils.get_master_top_sections_target() == 12
+    assert utils.get_master_top_sections_range() == (11, 12)
+
+
 def test_patch_pageindex_llm_helpers_uses_temperature_fallback(monkeypatch) -> None:
     """The PageIndex patch should inherit our LLM compatibility logic."""
     sync_calls: list[dict] = []
@@ -357,3 +388,83 @@ def test_patch_pageindex_progress_hooks_emits_summary_events() -> None:
     assert completed_events[0]["estimated_output_tokens"] > 0
     assert completed_events[-1]["total_input_tokens"] >= completed_events[0]["estimated_input_tokens"]
     assert completed_events[-1]["total_output_tokens"] >= completed_events[0]["estimated_output_tokens"]
+
+
+def test_patch_pageindex_progress_hooks_does_not_double_count_markdown_nodes() -> None:
+    """Markdown progress hooks should emit one completion event per real node.
+
+    DOCX ingestion is converted into Markdown first, so this guards the exact
+    path that previously inflated counts like `58/35` in the UI.
+    """
+
+    async def original_generate_node_summary(node, model=None):
+        return f"summary for {node['title']}"
+
+    async def original_generate_summaries_for_structure(structure, model=None):
+        return structure
+
+    async def original_md_get_node_summary(node, summary_token_threshold=200, model=None):
+        node_text = node.get("text", "")
+        if len(node_text) < summary_token_threshold:
+            return node_text
+        return await page_index_md_module.generate_node_summary(node, model=model)
+
+    async def original_md_generate_summaries_for_structure(structure, summary_token_threshold, model=None):
+        summaries = await asyncio.gather(
+            *[
+                page_index_md_module.get_node_summary(
+                    node,
+                    summary_token_threshold=summary_token_threshold,
+                    model=model,
+                )
+                for node in pageindex_utils.structure_to_list(structure)
+            ]
+        )
+        for node, summary in zip(pageindex_utils.structure_to_list(structure), summaries):
+            node["summary"] = summary
+        return structure
+
+    pageindex_utils = SimpleNamespace(
+        generate_node_summary=original_generate_node_summary,
+        generate_summaries_for_structure=original_generate_summaries_for_structure,
+        structure_to_list=lambda structure: structure["nodes"],
+    )
+    page_index_module = SimpleNamespace(
+        generate_node_summary=original_generate_node_summary,
+        generate_summaries_for_structure=original_generate_summaries_for_structure,
+    )
+    page_index_md_module = SimpleNamespace(
+        get_node_summary=original_md_get_node_summary,
+        generate_summaries_for_structure_md=original_md_generate_summaries_for_structure,
+        generate_node_summary=original_generate_node_summary,
+    )
+
+    utils.patch_pageindex_progress_hooks(
+        pageindex_utils,
+        page_index_module,
+        page_index_md_module,
+    )
+
+    events: list[dict] = []
+    structure = {
+        "nodes": [
+            {"node_id": "0001", "title": "Short node", "text": "short"},
+            {"node_id": "0002", "title": "Long node", "text": "x" * 500},
+        ]
+    }
+
+    with utils.progress_context(events.append):
+        asyncio.run(
+            page_index_md_module.generate_summaries_for_structure_md(
+                structure,
+                summary_token_threshold=200,
+                model="test-model",
+            )
+        )
+
+    completed_events = [
+        event for event in events if event["event"] == "pageindex_summary_node_completed"
+    ]
+    assert len(completed_events) == 2
+    assert completed_events[0]["completed_nodes"] == 1
+    assert completed_events[1]["completed_nodes"] == 2

@@ -20,7 +20,7 @@ import time
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Iterator
+from typing import Any, Callable, Iterator, Union
 
 logger = logging.getLogger(__name__)
 
@@ -38,6 +38,7 @@ except ImportError:  # pragma: no cover - optional in some test environments
 
 TEXT_FIELD_NAMES = {"node_text", "text"}
 _DOC_ID_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_-]*$")
+ConversationContext = Union[str, list[dict[str, Any]], None]
 
 
 def atomic_write_text(path: Path, content: str) -> None:
@@ -62,6 +63,8 @@ TOKENIZER_FALLBACK_PREFIXES = {
 TEMPERATURE_UNSUPPORTED_PREFIXES = ("gpt-5", "o1", "o3", "o4")
 INGESTION_REASONING_EFFORT = "high"
 REASONING_EFFORT_OPTIONS = ("minimal", "low", "medium", "high")
+MASTER_TOP_SECTIONS_DEFAULT = 4
+MASTER_TOP_SECTIONS_MAX = 12
 _PROGRESS_STATE = threading.local()
 _LLM_USAGE_TRACKER: contextvars.ContextVar[LLMUsageTotals | None] = contextvars.ContextVar(
     "llm_usage_tracker",
@@ -110,6 +113,41 @@ def validate_doc_id(doc_id: str) -> None:
         )
 
 
+def clamp_master_top_sections_target(value: int) -> int:
+    """Clamp the master-node top-section target into the supported range."""
+    return max(1, min(MASTER_TOP_SECTIONS_MAX, int(value)))
+
+
+def get_master_top_sections_target(value: int | None = None) -> int:
+    """Resolve the ingestion-time top-section target from override or env.
+
+    The default target is 4, which implies a prompt range of 3-5 sections.
+    Larger values widen routing coverage but also make the master-tree prompt
+    heavier at query time.
+    """
+    if value is not None:
+        return clamp_master_top_sections_target(value)
+
+    raw = os.getenv("MASTER_TOP_SECTIONS_TARGET", "").strip()
+    if not raw:
+        return MASTER_TOP_SECTIONS_DEFAULT
+    try:
+        return clamp_master_top_sections_target(int(raw))
+    except ValueError:
+        logger.warning(
+            "Invalid MASTER_TOP_SECTIONS_TARGET=%r; falling back to default %d.",
+            raw,
+            MASTER_TOP_SECTIONS_DEFAULT,
+        )
+        return MASTER_TOP_SECTIONS_DEFAULT
+
+
+def get_master_top_sections_range(target: int | None = None) -> tuple[int, int]:
+    """Return the inclusive `(min, max)` range used in the master-node prompt."""
+    resolved = get_master_top_sections_target(target)
+    return max(1, resolved - 1), min(MASTER_TOP_SECTIONS_MAX, resolved + 1)
+
+
 def strip_text_fields(value: Any) -> Any:
     """Recursively remove full-text fields from tree payloads."""
     if isinstance(value, dict):
@@ -137,16 +175,32 @@ def ensure_tiktoken_model_aliases() -> None:
         prefix_map.setdefault(model_prefix, encoding_name)
 
 
-def format_chat_history(history: list[dict] | None) -> str:
-    """Turn the last few chat turns into a compact prompt block."""
-    if not history:
+def render_conversation_context(context: ConversationContext) -> str:
+    """Normalize caller-supplied conversation context into prompt-ready text.
+
+    The reusable core accepts either:
+    - a raw string prepared by the caller, or
+    - a list of chat turns for convenience.
+
+    This keeps the library conversation-aware without making it the owner of
+    any session lifecycle.
+    """
+    if context is None:
         return ""
 
+    if isinstance(context, str):
+        return context.strip()
+
     lines = ["Prior conversation context:"]
-    for turn in history[-6:]:
+    for turn in context[-6:]:
         role = "User" if turn.get("role") == "user" else "Assistant"
         lines.append(f"{role}: {turn.get('content', '')}")
     return "\n".join(lines)
+
+
+def format_chat_history(history: list[dict] | None) -> str:
+    """Backward-compatible wrapper for callers still using chat-turn lists."""
+    return render_conversation_context(history)
 
 
 def iter_tree_nodes(tree: Any) -> Iterator[dict]:
@@ -1098,8 +1152,6 @@ def patch_pageindex_progress_hooks(
         )
     if hasattr(page_index_module, "generate_node_summary"):
         page_index_module.generate_node_summary = wrapped_generate_node_summary
-    if hasattr(page_index_md_module, "generate_node_summary"):
-        page_index_md_module.generate_node_summary = wrapped_generate_node_summary
 
     pageindex_utils_module.__hybrid_progress_hooks_patched__ = True
 

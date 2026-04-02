@@ -18,12 +18,13 @@ from dotenv import load_dotenv
 from arch_map.arch_map import ArchitectureMap
 from master_tree.master_tree import MasterTreeStore
 from utils import (
+    ConversationContext,
     create_chat_completion_async,
     extract_llm_text,
-    format_chat_history,
     get_async_client,
     get_default_model,
     parse_json_response,
+    render_conversation_context,
 )
 
 load_dotenv()
@@ -58,7 +59,7 @@ async def route_query(
     arch_map: ArchitectureMap,
     model: str | None = None,
     max_docs: int = 3,
-    chat_history: list[dict] | None = None,
+    conversation_context: ConversationContext = None,
     reasoning_effort: str | None = None,
 ) -> list[str]:
     """Choose the most relevant document ids for a user query (strict mode).
@@ -75,7 +76,7 @@ async def route_query(
 
     arch_map_context = arch_map.to_llm_context()
     master_tree_context = master_tree_store.to_llm_context()
-    chat_history_block = format_chat_history(chat_history)
+    conversation_block = render_conversation_context(conversation_context)
 
     system_prompt = f"""
 You are a document routing agent. You have access to a multi-document index and
@@ -101,7 +102,7 @@ Master Tree (all indexed documents):
     user_prompt = f"""
 Query: {query}
 
-{chat_history_block}
+{conversation_block}
 
 Select up to {max_docs} doc_ids. Return JSON array only.
 """.strip()
@@ -128,7 +129,7 @@ async def route_query_broadened(
     arch_map: ArchitectureMap,
     model: str | None = None,
     max_docs: int = 3,
-    chat_history: list[dict] | None = None,
+    conversation_context: ConversationContext = None,
     reasoning_effort: str | None = None,
 ) -> list[str]:
     """Broadened fallback routing for queries that strict routing could not match.
@@ -148,7 +149,7 @@ async def route_query_broadened(
 
     arch_map_context = arch_map.to_llm_context()
     master_tree_context = master_tree_store.to_llm_context()
-    chat_history_block = format_chat_history(chat_history)
+    conversation_block = render_conversation_context(conversation_context)
 
     system_prompt = f"""
 You are a document routing agent performing a broadened, best-effort search.
@@ -175,7 +176,7 @@ Master Tree (all indexed documents):
     user_prompt = f"""
 Query: {query}
 
-{chat_history_block}
+{conversation_block}
 
 Select up to {max_docs} tangentially related doc_ids. Return JSON array only.
 """.strip()
