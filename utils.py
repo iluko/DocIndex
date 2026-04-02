@@ -10,6 +10,7 @@ This is the most cross-cutting module in the project. It contains:
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import json
 import logging
 import os
@@ -62,6 +63,10 @@ TEMPERATURE_UNSUPPORTED_PREFIXES = ("gpt-5", "o1", "o3", "o4")
 INGESTION_REASONING_EFFORT = "high"
 REASONING_EFFORT_OPTIONS = ("minimal", "low", "medium", "high")
 _PROGRESS_STATE = threading.local()
+_LLM_USAGE_TRACKER: contextvars.ContextVar[LLMUsageTotals | None] = contextvars.ContextVar(
+    "llm_usage_tracker",
+    default=None,
+)
 
 
 @dataclass(frozen=True)
@@ -72,6 +77,22 @@ class LLMConfig:
     api_key: str
     base_url: str | None
     default_model: str
+
+
+@dataclass
+class LLMUsageTotals:
+    """Aggregated token usage across one higher-level workflow.
+
+    We track prompt/completion/total tokens plus how many LLM calls contributed
+    to the totals. When an SDK response omits usage metadata we fall back to
+    estimates, so callers can surface that caveat to users.
+    """
+
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    total_tokens: int = 0
+    llm_calls: int = 0
+    estimated_calls: int = 0
 
 
 def validate_doc_id(doc_id: str) -> None:
@@ -338,6 +359,123 @@ def extract_finish_reason(response: Any) -> str | None:
     return None
 
 
+def extract_usage(response: Any) -> tuple[int, int, int] | None:
+    """Extract ``(prompt_tokens, completion_tokens, total_tokens)`` when present.
+
+    Supports plain dict payloads plus SDK objects whose ``usage`` field exposes
+    either attributes or a dict-like shape.
+    """
+    usage = None
+    if isinstance(response, dict):
+        usage = response.get("usage")
+    else:
+        usage = getattr(response, "usage", None)
+
+    if usage is None:
+        return None
+
+    if isinstance(usage, dict):
+        prompt_tokens = usage.get("prompt_tokens")
+        completion_tokens = usage.get("completion_tokens")
+        total_tokens = usage.get("total_tokens")
+    else:
+        prompt_tokens = getattr(usage, "prompt_tokens", None)
+        completion_tokens = getattr(usage, "completion_tokens", None)
+        total_tokens = getattr(usage, "total_tokens", None)
+
+    if prompt_tokens is None and completion_tokens is None and total_tokens is None:
+        return None
+
+    prompt = int(prompt_tokens or 0)
+    completion = int(completion_tokens or 0)
+    total = int(total_tokens or (prompt + completion))
+    return prompt, completion, total
+
+
+def _message_content_to_text(content: Any) -> str:
+    """Flatten chat-message content into plain text for coarse token estimates."""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts: list[str] = []
+        for item in content:
+            if isinstance(item, dict):
+                parts.append(str(item.get("text", "")))
+            else:
+                parts.append(str(getattr(item, "text", item)))
+        return "".join(parts)
+    return str(content or "")
+
+
+def estimate_message_tokens(messages: list[dict[str, Any]]) -> int:
+    """Estimate prompt tokens for a chat completion from its messages.
+
+    This is intentionally approximate. We add a small fixed overhead per
+    message so totals are not unrealistically low when exact provider usage is
+    unavailable.
+    """
+    total = 0
+    for message in messages:
+        total += 4  # coarse per-message framing overhead
+        total += estimate_tokens(str(message.get("role", "")))
+        total += estimate_tokens(_message_content_to_text(message.get("content", "")))
+    return total + 2  # coarse assistant priming overhead
+
+
+def get_llm_usage_tracker() -> LLMUsageTotals | None:
+    """Return the active query-scoped usage accumulator, if one is installed."""
+    return _LLM_USAGE_TRACKER.get()
+
+
+@contextmanager
+def llm_usage_context() -> Iterator[LLMUsageTotals]:
+    """Collect token usage across nested LLM calls within a workflow."""
+    tracker = LLMUsageTotals()
+    token = _LLM_USAGE_TRACKER.set(tracker)
+    try:
+        yield tracker
+    finally:
+        _LLM_USAGE_TRACKER.reset(token)
+
+
+def record_llm_usage(
+    *,
+    messages: list[dict[str, Any]],
+    response: Any | None = None,
+    completion_text: str | None = None,
+    usage: tuple[int, int, int] | None = None,
+) -> None:
+    """Add one chat-completion's usage into the active tracker, if any exists.
+
+    Exact provider-reported usage is preferred. When absent, we fall back to a
+    coarse estimate based on prompt text and completion text length.
+    """
+    tracker = get_llm_usage_tracker()
+    if tracker is None:
+        return
+
+    measured = usage if usage is not None else extract_usage(response)
+    estimated = measured is None
+    if measured is None:
+        prompt_tokens = estimate_message_tokens(messages)
+        if completion_text is None:
+            try:
+                completion_text = extract_llm_text(response) if response is not None else ""
+            except Exception:
+                completion_text = ""
+        completion_tokens = estimate_tokens(completion_text or "")
+        total_tokens = prompt_tokens + completion_tokens
+    else:
+        prompt_tokens, completion_tokens, total_tokens = measured
+
+    tracker.prompt_tokens += int(prompt_tokens)
+    tracker.completion_tokens += int(completion_tokens)
+    tracker.total_tokens += int(total_tokens)
+    tracker.llm_calls += 1
+    if estimated:
+        tracker.estimated_calls += 1
+
+
 def model_supports_explicit_temperature(model: str | None) -> bool:
     """Return whether a model family accepts an explicit `temperature` value."""
     if not model:
@@ -391,6 +529,20 @@ def is_reasoning_effort_unsupported_error(exc: Exception) -> bool:
             or "not supported" in message
             or "unknown parameter" in message
             or "extra inputs are not permitted" in message
+        )
+    )
+
+
+def is_stream_options_unsupported_error(exc: Exception) -> bool:
+    """Detect providers that reject ``stream_options`` on streaming requests."""
+    message = str(exc).lower()
+    return (
+        "stream_options" in message
+        and (
+            "unsupported" in message
+            or "unknown parameter" in message
+            or "extra inputs are not permitted" in message
+            or "not supported" in message
         )
     )
 
@@ -558,7 +710,9 @@ def create_chat_completion(
     )
     while True:
         try:
-            return client.chat.completions.create(**request_kwargs)
+            response = client.chat.completions.create(**request_kwargs)
+            record_llm_usage(messages=messages, response=response)
+            return response
         except Exception as exc:
             stripped = False
             if "temperature" in request_kwargs and is_temperature_unsupported_error(exc):
@@ -589,7 +743,9 @@ async def create_chat_completion_async(
     )
     while True:
         try:
-            return await client.chat.completions.create(**request_kwargs)
+            response = await client.chat.completions.create(**request_kwargs)
+            record_llm_usage(messages=messages, response=response)
+            return response
         except Exception as exc:
             stripped = False
             if "temperature" in request_kwargs and is_temperature_unsupported_error(exc):

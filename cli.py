@@ -232,6 +232,25 @@ def query_command(
             console.print()  # newline after streamed answer
         else:
             console.print(Panel(result.answer, title="Answer", expand=False))
+        if result.metrics is not None:
+            token_note = " (includes estimates)" if result.metrics.estimated_token_usage else ""
+            console.print(
+                "TTFT: "
+                f"{result.metrics.ttft_seconds:.2f}s"
+                "  |  Total: "
+                f"{result.metrics.total_time_seconds:.2f}s"
+                "  |  Tokens: "
+                f"{result.metrics.total_tokens:,}"
+                f"{token_note}"
+            )
+            console.print(
+                "  prompt="
+                f"{result.metrics.prompt_tokens:,}"
+                "  completion="
+                f"{result.metrics.completion_tokens:,}"
+                "  llm_calls="
+                f"{result.metrics.llm_calls}"
+            )
 
         if verbose:
             console.print(f"Selected docs: {result.selected_docs}")

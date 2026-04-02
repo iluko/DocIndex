@@ -523,6 +523,26 @@ def render_query_trace(result: QueryResult | None) -> None:
         st.info("Ask a question to inspect routing, navigation, and chunk assembly.")
         return
 
+    if result.metrics is not None:
+        st.markdown("### Answer Metrics")
+        metric_a, metric_b, metric_c = st.columns(3)
+        with metric_a:
+            render_metric("TTFT", f"{result.metrics.ttft_seconds:.2f}s")
+        with metric_b:
+            render_metric("Total Time", f"{result.metrics.total_time_seconds:.2f}s")
+        with metric_c:
+            render_metric("Total Tokens", f"{result.metrics.total_tokens:,}")
+        st.caption(
+            "Prompt tokens: "
+            f"{result.metrics.prompt_tokens:,} | Completion tokens: "
+            f"{result.metrics.completion_tokens:,} | LLM calls: {result.metrics.llm_calls}"
+            + (
+                " | Token usage includes estimates for one or more calls."
+                if result.metrics.estimated_token_usage
+                else ""
+            )
+        )
+
     st.markdown("### Latest Query Mapping")
     render_metric("Selected Docs", ", ".join(result.selected_docs) or "None")
     render_metric("Selected Nodes", ", ".join(result.selected_nodes) or "None")

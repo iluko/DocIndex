@@ -201,6 +201,9 @@ def test_query_sequences_router_navigator_fetch_and_history(
     assert result.retrieved_context == "retrieved context"
     assert result.answer == "The refresh flow is documented in the auth spec."
     assert result.trace is not None
+    assert result.metrics is not None
+    assert result.metrics.ttft_seconds >= 0
+    assert result.metrics.total_time_seconds >= 0
     assert result.trace.navigation == {
         "auth_doc": ["auth_doc::0002"],
         "rbac_doc": ["rbac_doc::0002"],

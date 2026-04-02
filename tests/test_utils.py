@@ -11,7 +11,12 @@ import utils
 class _FakeResponse:
     """Minimal fake chat-completion response used by utility tests."""
 
-    def __init__(self, content: str = "ok", finish_reason: str = "stop") -> None:
+    def __init__(
+        self,
+        content: str = "ok",
+        finish_reason: str = "stop",
+        usage: tuple[int, int, int] | None = None,
+    ) -> None:
         """Create a minimal response object with the fields the code reads."""
         self.choices = [
             SimpleNamespace(
@@ -19,6 +24,13 @@ class _FakeResponse:
                 finish_reason=finish_reason,
             )
         ]
+        if usage is not None:
+            prompt_tokens, completion_tokens, total_tokens = usage
+            self.usage = SimpleNamespace(
+                prompt_tokens=prompt_tokens,
+                completion_tokens=completion_tokens,
+                total_tokens=total_tokens,
+            )
 
 
 class _FakeSyncCompletions:
@@ -29,11 +41,13 @@ class _FakeSyncCompletions:
         calls: list[dict],
         fail_once_on_temperature: bool,
         fail_once_on_reasoning_effort: bool = False,
+        response_usage: tuple[int, int, int] | None = None,
     ) -> None:
         """Remember which simulated failures this fake endpoint should trigger."""
         self._calls = calls
         self._fail_once_on_temperature = fail_once_on_temperature
         self._fail_once_on_reasoning_effort = fail_once_on_reasoning_effort
+        self._response_usage = response_usage
 
     def create(self, **kwargs):
         """Record the call and optionally fail on selected unsupported params."""
@@ -47,7 +61,7 @@ class _FakeSyncCompletions:
         if self._fail_once_on_reasoning_effort and "reasoning_effort" in kwargs:
             self._fail_once_on_reasoning_effort = False
             raise Exception("Unsupported parameter: 'reasoning_effort'")
-        return _FakeResponse()
+        return _FakeResponse(usage=self._response_usage)
 
 
 class _FakeAsyncCompletions:
@@ -58,11 +72,13 @@ class _FakeAsyncCompletions:
         calls: list[dict],
         fail_once_on_temperature: bool,
         fail_once_on_reasoning_effort: bool = False,
+        response_usage: tuple[int, int, int] | None = None,
     ) -> None:
         """Remember which simulated failures this fake async endpoint should trigger."""
         self._calls = calls
         self._fail_once_on_temperature = fail_once_on_temperature
         self._fail_once_on_reasoning_effort = fail_once_on_reasoning_effort
+        self._response_usage = response_usage
 
     async def create(self, **kwargs):
         """Async version of the fake completions endpoint."""
@@ -76,7 +92,7 @@ class _FakeAsyncCompletions:
         if self._fail_once_on_reasoning_effort and "reasoning_effort" in kwargs:
             self._fail_once_on_reasoning_effort = False
             raise Exception("Unsupported parameter: 'reasoning_effort'")
-        return _FakeResponse()
+        return _FakeResponse(usage=self._response_usage)
 
 
 class _FakeSyncClient:
@@ -87,6 +103,7 @@ class _FakeSyncClient:
         calls: list[dict],
         fail_once_on_temperature: bool = False,
         fail_once_on_reasoning_effort: bool = False,
+        response_usage: tuple[int, int, int] | None = None,
     ) -> None:
         """Expose the same nested attribute shape as the real sync SDK client."""
         self.chat = SimpleNamespace(
@@ -94,6 +111,7 @@ class _FakeSyncClient:
                 calls,
                 fail_once_on_temperature,
                 fail_once_on_reasoning_effort,
+                response_usage,
             )
         )
 
@@ -106,6 +124,7 @@ class _FakeAsyncClient:
         calls: list[dict],
         fail_once_on_temperature: bool = False,
         fail_once_on_reasoning_effort: bool = False,
+        response_usage: tuple[int, int, int] | None = None,
     ) -> None:
         """Expose the same nested attribute shape as the real async SDK client."""
         self.chat = SimpleNamespace(
@@ -113,6 +132,7 @@ class _FakeAsyncClient:
                 calls,
                 fail_once_on_temperature,
                 fail_once_on_reasoning_effort,
+                response_usage,
             )
         )
 
@@ -176,6 +196,42 @@ def test_create_chat_completion_retries_without_reasoning_effort_on_unsupported_
     assert len(calls) == 2
     assert calls[0]["reasoning_effort"] == "high"
     assert "reasoning_effort" not in calls[1]
+
+
+def test_create_chat_completion_records_exact_usage_in_context() -> None:
+    """Usage metadata on responses should flow into the shared tracker."""
+    calls: list[dict] = []
+    client = _FakeSyncClient(calls, response_usage=(120, 30, 150))
+
+    with utils.llm_usage_context() as tracker:
+        utils.create_chat_completion(
+            client=client,
+            model="gpt-4.1",
+            messages=[{"role": "user", "content": "hello"}],
+        )
+
+    assert tracker.prompt_tokens == 120
+    assert tracker.completion_tokens == 30
+    assert tracker.total_tokens == 150
+    assert tracker.llm_calls == 1
+    assert tracker.estimated_calls == 0
+
+
+def test_create_chat_completion_estimates_usage_when_response_omits_it() -> None:
+    """When provider usage is absent, the tracker should fall back to estimates."""
+    calls: list[dict] = []
+    client = _FakeSyncClient(calls)
+
+    with utils.llm_usage_context() as tracker:
+        utils.create_chat_completion(
+            client=client,
+            model="gpt-4.1",
+            messages=[{"role": "user", "content": "hello"}],
+        )
+
+    assert tracker.total_tokens > 0
+    assert tracker.llm_calls == 1
+    assert tracker.estimated_calls == 1
 
 
 def test_patch_pageindex_llm_helpers_uses_temperature_fallback(monkeypatch) -> None:

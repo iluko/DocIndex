@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
@@ -41,17 +42,22 @@ from retrieval.verifier import verify_navigation_batch
 from storage.store import DocumentStore
 from utils import (
     create_chat_completion_async,
+    extract_usage,
     extract_llm_text,
     format_chat_history,
     get_async_client,
     get_default_model,
     get_domain_name,
+    get_llm_usage_tracker,
     get_navigator_verification_enabled,
     get_retrieval_mode,
     is_reasoning_effort_unsupported_error,
+    is_stream_options_unsupported_error,
     is_temperature_unsupported_error,
+    llm_usage_context,
     model_supports_explicit_temperature,
     normalize_reasoning_effort,
+    record_llm_usage,
 )
 
 load_dotenv()
@@ -98,6 +104,20 @@ class QueryResult:
     chat_history_updated: list[dict]
     trace: QueryTrace | None = None
     sources: list[SourceReference] = field(default_factory=list)
+    metrics: QueryMetrics | None = None
+
+
+@dataclass
+class QueryMetrics:
+    """Latency and token-usage numbers for one completed query."""
+
+    ttft_seconds: float
+    total_time_seconds: float
+    prompt_tokens: int
+    completion_tokens: int
+    total_tokens: int
+    llm_calls: int
+    estimated_token_usage: bool = False
 
 
 # ── Internal helpers ──────────────────────────────────────────────────────────
@@ -131,7 +151,7 @@ async def _answer_query_streaming(
     reasoning_effort: str | None,
     on_token: Callable[[str], None],
 ) -> str:
-    """Stream the answer LLM call, calling on_token for each chunk, and return the full text."""
+    """Stream the answer call, forwarding tokens and returning the full answer."""
     client = get_async_client()
     messages = [
         {"role": "system", "content": system_prompt},
@@ -141,6 +161,7 @@ async def _answer_query_streaming(
         "model": model,
         "messages": messages,
         "stream": True,
+        "stream_options": {"include_usage": True},
     }
     if model_supports_explicit_temperature(model):
         request_kwargs["temperature"] = 0.1
@@ -160,16 +181,27 @@ async def _answer_query_streaming(
             if "temperature" in request_kwargs and is_temperature_unsupported_error(exc):
                 request_kwargs.pop("temperature")
                 stripped = True
+            if "stream_options" in request_kwargs and is_stream_options_unsupported_error(exc):
+                request_kwargs.pop("stream_options")
+                stripped = True
             if not stripped:
                 raise
 
     collected: list[str] = []
+    usage_recorded = False
     async for chunk in stream:
+        usage = extract_usage(chunk)
+        if usage is not None:
+            record_llm_usage(messages=messages, usage=usage)
+            usage_recorded = True
         if chunk.choices and chunk.choices[0].delta.content:
             token: str = chunk.choices[0].delta.content
             on_token(token)
             collected.append(token)
-    return "".join(collected)
+    answer = "".join(collected)
+    if not usage_recorded:
+        record_llm_usage(messages=messages, completion_text=answer)
+    return answer
 
 
 def _build_answer_system_prompt(
@@ -412,6 +444,30 @@ async def _run_pageindex_mode(
     return answer, accessed_nodes, navigation_map, combined_context
 
 
+def _build_query_metrics(
+    query_started_at: float,
+    *,
+    ttft_seconds: float | None = None,
+) -> QueryMetrics:
+    """Snapshot end-to-end latency plus aggregated LLM usage for the query."""
+    total_time_seconds = max(0.0, time.perf_counter() - query_started_at)
+    if ttft_seconds is None:
+        # Non-streamed answers become visible only once the full answer returns.
+        resolved_ttft = total_time_seconds
+    else:
+        resolved_ttft = max(0.0, ttft_seconds)
+    usage = get_llm_usage_tracker()
+    return QueryMetrics(
+        ttft_seconds=resolved_ttft,
+        total_time_seconds=total_time_seconds,
+        prompt_tokens=usage.prompt_tokens if usage is not None else 0,
+        completion_tokens=usage.completion_tokens if usage is not None else 0,
+        total_tokens=usage.total_tokens if usage is not None else 0,
+        llm_calls=usage.llm_calls if usage is not None else 0,
+        estimated_token_usage=bool(usage and usage.estimated_calls),
+    )
+
+
 # ── Public entry point ────────────────────────────────────────────────────────
 
 
@@ -438,22 +494,20 @@ async def query(
     model = model or get_default_model()
     history = list(chat_history or [])
     retrieval_mode = get_retrieval_mode()
+    query_started_at = time.perf_counter()
+    first_token_elapsed: float | None = None
 
-    # ── Routing (shared by both modes) ────────────────────────────────────────
-    selected_doc_ids = await route_query(
-        query=user_query,
-        master_tree_store=master_tree_store,
-        arch_map=arch_map,
-        model=model,
-        max_docs=max_docs,
-        chat_history=history,
-        reasoning_effort=reasoning_effort,
-    )
+    def _wrapped_answer_token(token: str) -> None:
+        """Capture end-to-end TTFT once, then forward streamed text onward."""
+        nonlocal first_token_elapsed
+        if first_token_elapsed is None:
+            first_token_elapsed = max(0.0, time.perf_counter() - query_started_at)
+        if answer_token_callback is not None:
+            answer_token_callback(token)
 
-    routing_broadened = False
-    if not selected_doc_ids:
-        # Strict routing found nothing — try the broadened pass before giving up.
-        selected_doc_ids = await route_query_broadened(
+    with llm_usage_context():
+        # ── Routing (shared by both modes) ────────────────────────────────────
+        selected_doc_ids = await route_query(
             query=user_query,
             master_tree_store=master_tree_store,
             arch_map=arch_map,
@@ -462,64 +516,144 @@ async def query(
             chat_history=history,
             reasoning_effort=reasoning_effort,
         )
-        if selected_doc_ids:
-            routing_broadened = True
-            logger.info(
-                "Strict routing found no matches; broadened routing selected: %s",
-                selected_doc_ids,
+
+        routing_broadened = False
+        if not selected_doc_ids:
+            # Strict routing found nothing — try the broadened pass before giving up.
+            selected_doc_ids = await route_query_broadened(
+                query=user_query,
+                master_tree_store=master_tree_store,
+                arch_map=arch_map,
+                model=model,
+                max_docs=max_docs,
+                chat_history=history,
+                reasoning_effort=reasoning_effort,
+            )
+            if selected_doc_ids:
+                routing_broadened = True
+                logger.info(
+                    "Strict routing found no matches; broadened routing selected: %s",
+                    selected_doc_ids,
+                )
+
+        if verbose:
+            console.print(
+                f"Routing → {selected_doc_ids} "
+                f"[mode={retrieval_mode}, broadened={routing_broadened}]"
             )
 
-    if verbose:
-        console.print(
-            f"Routing → {selected_doc_ids} "
-            f"[mode={retrieval_mode}, broadened={routing_broadened}]"
-        )
+        # ── Hard no-match path ────────────────────────────────────────────────
+        if not selected_doc_ids:
+            answer = (
+                "I couldn't identify any indexed documents relevant to this query, "
+                "even after a broadened search. Please check that the relevant "
+                "documents have been ingested."
+            )
+            updated_history = history + [
+                {"role": "user", "content": user_query},
+                {"role": "assistant", "content": answer},
+            ]
+            return QueryResult(
+                answer=answer,
+                selected_docs=[],
+                selected_nodes=[],
+                retrieved_context="",
+                chat_history_updated=updated_history,
+                sources=[],
+                trace=QueryTrace(
+                    routed_docs=[],
+                    navigation={},
+                    fetched_chunks=[],
+                    token_budget=0,
+                    truncated=False,
+                    retrieval_mode=retrieval_mode,
+                    routing_broadened=False,
+                    verification_applied=False,
+                ),
+                metrics=_build_query_metrics(
+                    query_started_at,
+                    ttft_seconds=first_token_elapsed,
+                ),
+            )
 
-    # ── Hard no-match path ────────────────────────────────────────────────────
-    if not selected_doc_ids:
-        answer = (
-            "I couldn't identify any indexed documents relevant to this query, "
-            "even after a broadened search. Please check that the relevant "
-            "documents have been ingested."
-        )
-        updated_history = history + [
-            {"role": "user", "content": user_query},
-            {"role": "assistant", "content": answer},
-        ]
-        return QueryResult(
-            answer=answer,
-            selected_docs=[],
-            selected_nodes=[],
-            retrieved_context="",
-            chat_history_updated=updated_history,
-            sources=[],
-            trace=QueryTrace(
-                routed_docs=[],
-                navigation={},
-                fetched_chunks=[],
-                token_budget=0,
-                truncated=False,
-                retrieval_mode=retrieval_mode,
-                routing_broadened=False,
-                verification_applied=False,
+        # ── PageIndex agentic mode ────────────────────────────────────────────
+        if retrieval_mode == "pageindex":
+            answer, selected_nodes, navigation_map, retrieved_context = (
+                await _run_pageindex_mode(
+                    user_query=user_query,
+                    history=history,
+                    selected_doc_ids=selected_doc_ids,
+                    master_tree_store=master_tree_store,
+                    storage=storage,
+                    arch_map=arch_map,
+                    model=model,
+                    verbose=verbose,
+                    reasoning_effort=reasoning_effort,
+                )
+            )
+            updated_history = history + [
+                {"role": "user", "content": user_query},
+                {"role": "assistant", "content": answer},
+            ]
+            return QueryResult(
+                answer=answer,
+                selected_docs=selected_doc_ids,
+                selected_nodes=selected_nodes,
+                retrieved_context=retrieved_context,
+                chat_history_updated=updated_history,
+                sources=[],
+                trace=QueryTrace(
+                    routed_docs=selected_doc_ids,
+                    navigation=navigation_map,
+                    fetched_chunks=[],
+                    token_budget=0,
+                    truncated=False,
+                    retrieval_mode="pageindex",
+                    routing_broadened=routing_broadened,
+                    verification_applied=False,
+                ),
+                metrics=_build_query_metrics(
+                    query_started_at,
+                    ttft_seconds=first_token_elapsed,
+                ),
+            )
+
+        # ── Hybrid deterministic mode ─────────────────────────────────────────
+        (
+            answer,
+            selected_nodes,
+            navigation_map,
+            chunks,
+            token_budget,
+            fetch_truncated,
+            retrieved_context,
+            verification_applied,
+        ) = await _run_hybrid(
+            user_query=user_query,
+            history=history,
+            selected_doc_ids=selected_doc_ids,
+            routing_broadened=routing_broadened,
+            master_tree_store=master_tree_store,
+            storage=storage,
+            arch_map=arch_map,
+            model=model,
+            verbose=verbose,
+            reasoning_effort=reasoning_effort,
+            answer_token_callback=(
+                _wrapped_answer_token if answer_token_callback is not None else None
             ),
         )
 
-    # ── PageIndex agentic mode ────────────────────────────────────────────────
-    if retrieval_mode == "pageindex":
-        answer, selected_nodes, navigation_map, retrieved_context = (
-            await _run_pageindex_mode(
-                user_query=user_query,
-                history=history,
-                selected_doc_ids=selected_doc_ids,
-                master_tree_store=master_tree_store,
-                storage=storage,
-                arch_map=arch_map,
-                model=model,
-                verbose=verbose,
-                reasoning_effort=reasoning_effort,
+        sources = [
+            SourceReference(
+                node_ref=chunk.node_ref,
+                doc_id=chunk.doc_id,
+                section=chunk.title,
+                page_range=f"{chunk.start_index}–{chunk.end_index}",
             )
-        )
+            for chunk in chunks
+        ]
+
         updated_history = history + [
             {"role": "user", "content": user_query},
             {"role": "assistant", "content": answer},
@@ -530,72 +664,19 @@ async def query(
             selected_nodes=selected_nodes,
             retrieved_context=retrieved_context,
             chat_history_updated=updated_history,
-            sources=[],
+            sources=sources,
             trace=QueryTrace(
                 routed_docs=selected_doc_ids,
                 navigation=navigation_map,
-                fetched_chunks=[],
-                token_budget=0,
-                truncated=False,
-                retrieval_mode="pageindex",
+                fetched_chunks=chunks,
+                token_budget=token_budget,
+                truncated=fetch_truncated,
+                retrieval_mode="hybrid",
                 routing_broadened=routing_broadened,
-                verification_applied=False,
+                verification_applied=verification_applied,
+            ),
+            metrics=_build_query_metrics(
+                query_started_at,
+                ttft_seconds=first_token_elapsed,
             ),
         )
-
-    # ── Hybrid deterministic mode ─────────────────────────────────────────────
-    (
-        answer,
-        selected_nodes,
-        navigation_map,
-        chunks,
-        token_budget,
-        fetch_truncated,
-        retrieved_context,
-        verification_applied,
-    ) = await _run_hybrid(
-        user_query=user_query,
-        history=history,
-        selected_doc_ids=selected_doc_ids,
-        routing_broadened=routing_broadened,
-        master_tree_store=master_tree_store,
-        storage=storage,
-        arch_map=arch_map,
-        model=model,
-        verbose=verbose,
-        reasoning_effort=reasoning_effort,
-        answer_token_callback=answer_token_callback,
-    )
-
-    sources = [
-        SourceReference(
-            node_ref=chunk.node_ref,
-            doc_id=chunk.doc_id,
-            section=chunk.title,
-            page_range=f"{chunk.start_index}–{chunk.end_index}",
-        )
-        for chunk in chunks
-    ]
-
-    updated_history = history + [
-        {"role": "user", "content": user_query},
-        {"role": "assistant", "content": answer},
-    ]
-    return QueryResult(
-        answer=answer,
-        selected_docs=selected_doc_ids,
-        selected_nodes=selected_nodes,
-        retrieved_context=retrieved_context,
-        chat_history_updated=updated_history,
-        sources=sources,
-        trace=QueryTrace(
-            routed_docs=selected_doc_ids,
-            navigation=navigation_map,
-            fetched_chunks=chunks,
-            token_budget=token_budget,
-            truncated=fetch_truncated,
-            retrieval_mode="hybrid",
-            routing_broadened=routing_broadened,
-            verification_applied=verification_applied,
-        ),
-    )
