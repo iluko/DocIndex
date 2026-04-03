@@ -10,7 +10,6 @@ import retrieval.navigator as navigator_module
 import retrieval.query_engine as query_engine_module
 import retrieval.router as router_module
 from retrieval import fetcher as fetcher_module
-from arch_map.arch_map import ArchitectureMap
 from master_tree.master_tree import MasterTreeStore
 from master_tree.schema import MasterNode
 from retrieval.fetcher import FetchResult, RetrievedChunk
@@ -37,7 +36,6 @@ def test_router_returns_only_known_doc_ids(tmp_path: Path, monkeypatch) -> None:
     """The router should filter out doc ids that are not in the master tree."""
     master_tree_store = MasterTreeStore(str(tmp_path / "master_tree.json"))
     _seed_master_tree(master_tree_store)
-    arch_map = ArchitectureMap(str(tmp_path / "missing_arch_map.json"))
 
     async def fake_chat_completion(
         model: str,
@@ -56,7 +54,6 @@ def test_router_returns_only_known_doc_ids(tmp_path: Path, monkeypatch) -> None:
         router_module.route_query(
             query="How does auth connect to RBAC?",
             master_tree_store=master_tree_store,
-            arch_map=arch_map,
         )
     )
 
@@ -97,17 +94,6 @@ def test_query_sequences_router_navigator_fetch_and_context(
     """The query engine should consume caller context without owning history state."""
     master_tree_store = MasterTreeStore(str(tmp_path / "master_tree.json"))
     storage = DocumentStore(str(tmp_path / "data"))
-    arch_map_path = tmp_path / "arch_map.json"
-    arch_map_path.write_text(
-        json.dumps(
-            {
-                "description": "SIP modules",
-                "modules": [{"name": "Auth", "connects_to": ["RBAC"], "description": "Auth module"}],
-            }
-        ),
-        encoding="utf-8",
-    )
-    arch_map = ArchitectureMap(str(arch_map_path))
     sample_tree = _load_fixture("sample_doc_tree.json")
 
     _seed_master_tree(master_tree_store)
@@ -188,7 +174,6 @@ def test_query_sequences_router_navigator_fetch_and_context(
             user_query="What is the token refresh flow?",
             master_tree_store=master_tree_store,
             storage=storage,
-            arch_map=arch_map,
             conversation_context=[{"role": "user", "content": "Earlier question"}],
             reasoning_effort="high",
         )

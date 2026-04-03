@@ -216,7 +216,7 @@ def test_run_pageindex_retrieval_direct_answer(monkeypatch) -> None:
 
     storage = SimpleNamespace(load_doc_tree=lambda d: {}, load_doc_source_path=lambda d: "")
     master_tree_store = SimpleNamespace(get_node=lambda d: None)
-    arch_map = SimpleNamespace(to_llm_context=lambda: "")
+
 
     answer, accessed_nodes, combined_context = asyncio.run(
         run_pageindex_retrieval(
@@ -224,7 +224,7 @@ def test_run_pageindex_retrieval_direct_answer(monkeypatch) -> None:
             selected_doc_ids=["doc1"],
             master_tree_store=master_tree_store,
             storage=storage,
-            arch_map=arch_map,
+
         )
     )
 
@@ -250,7 +250,7 @@ def test_run_pageindex_retrieval_tool_call_then_answer(monkeypatch) -> None:
         load_doc_source_path=lambda d: "",
     )
     master_tree_store = SimpleNamespace(get_node=lambda d: None)
-    arch_map = SimpleNamespace(to_llm_context=lambda: "")
+
 
     answer, accessed_nodes, combined_context = asyncio.run(
         run_pageindex_retrieval(
@@ -258,7 +258,7 @@ def test_run_pageindex_retrieval_tool_call_then_answer(monkeypatch) -> None:
             selected_doc_ids=["doc1"],
             master_tree_store=master_tree_store,
             storage=storage,
-            arch_map=arch_map,
+
         )
     )
 
@@ -295,7 +295,7 @@ def test_run_pageindex_retrieval_max_tool_calls_prompts_final_answer(monkeypatch
         load_doc_source_path=lambda d: "",
     )
     master_tree_store = SimpleNamespace(get_node=lambda d: None)
-    arch_map = SimpleNamespace(to_llm_context=lambda: "")
+
 
     answer, _, _ = asyncio.run(
         run_pageindex_retrieval(
@@ -303,7 +303,7 @@ def test_run_pageindex_retrieval_max_tool_calls_prompts_final_answer(monkeypatch
             selected_doc_ids=["doc1"],
             master_tree_store=master_tree_store,
             storage=storage,
-            arch_map=arch_map,
+
             max_tool_calls=2,
         )
     )

@@ -21,9 +21,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from arch_map.arch_map import ArchitectureMap
 from master_tree.factory import create_master_tree_store
 from storage.factory import create_document_store
+from traces.factory import create_trace_store
+from traces.service import TraceService
 from utils import detect_llm_provider, get_default_model
 
 
@@ -42,7 +43,6 @@ class IndexContext:
     index_dir: Path
     master_tree_path: Path
     metadata_path: Path
-    arch_map_path: Path
     uploads_dir: Path
 
 
@@ -53,7 +53,7 @@ class RuntimeComponents:
     index_context: IndexContext
     master_tree_store: Any  # MasterTreeStore or MongoMasterTreeStore
     storage: Any  # DocumentStore or MongoDocumentStore
-    arch_map: ArchitectureMap
+    trace_service: TraceService
 
 
 def sanitize_index_key_part(value: str) -> str:
@@ -106,7 +106,6 @@ def resolve_index_context(
         index_dir=index_dir,
         master_tree_path=index_dir / "master_tree.json",
         metadata_path=index_dir / "index_meta.json",
-        arch_map_path=base_dir / "arch_map.json",
         uploads_dir=base_dir / "uploads",
     )
 
@@ -167,11 +166,12 @@ def build_runtime_components(
 
     ensure_index_metadata(context)
 
+    trace_store = create_trace_store(str(context.base_data_dir), context.project)
     return RuntimeComponents(
         index_context=context,
         master_tree_store=create_master_tree_store(str(context.master_tree_path), context.project),
         storage=create_document_store(str(context.index_dir), context.project),
-        arch_map=ArchitectureMap(str(context.arch_map_path)),
+        trace_service=TraceService(trace_store),
     )
 
 

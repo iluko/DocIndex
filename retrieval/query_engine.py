@@ -32,12 +32,11 @@ from dataclasses import dataclass, field
 from dotenv import load_dotenv
 from rich.console import Console
 
-from arch_map.arch_map import ArchitectureMap
 from master_tree.master_tree import MasterTreeStore
 from retrieval.fetcher import RetrievedChunk, fetch_multiple_nodes_detailed
 from retrieval.navigator import navigate_doc_tree
 from retrieval.pageindex_engine import run_pageindex_retrieval
-from retrieval.router import route_query, route_query_broadened
+from retrieval.router import RouterCapture, route_query, route_query_broadened
 from retrieval.verifier import verify_navigation_batch
 from storage.store import DocumentStore
 from utils import (
@@ -60,6 +59,12 @@ from utils import (
     record_llm_usage,
     render_conversation_context,
 )
+
+# TYPE_CHECKING import avoids a hard dependency on the traces package at module
+# load time — the feature is opt-in via the trace_service parameter.
+from typing import TYPE_CHECKING
+if TYPE_CHECKING:
+    from traces.service import TraceService
 
 load_dotenv()
 
@@ -206,7 +211,6 @@ async def _answer_query_streaming(
 
 def _build_answer_system_prompt(
     retrieved_context: str,
-    arch_map_context: str,
     truncated: bool,
     routing_broadened: bool,
 ) -> str:
@@ -254,12 +258,9 @@ def _build_answer_system_prompt(
     if caveats:
         caveat_block = "\n\nImportant:\n" + "\n".join(f"- {c}" for c in caveats)
 
-    arch_block = f"\n\nDomain Context:\n{arch_map_context}" if arch_map_context else ""
-
     return (
         f"{intro}{caveat_block}"
         f"\n\nRetrieved Context:\n{retrieved_context}"
-        f"{arch_block}"
     )
 
 
@@ -307,7 +308,6 @@ async def _run_hybrid(
     routing_broadened: bool,
     master_tree_store: MasterTreeStore,
     storage: DocumentStore,
-    arch_map: ArchitectureMap,
     model: str,
     verbose: bool,
     reasoning_effort: str | None,
@@ -374,13 +374,11 @@ async def _run_hybrid(
     # ── Step 3: Fetch ─────────────────────────────────────────────────────────
     fetch_result = await fetch_multiple_nodes_detailed(selected_nodes, storage)
     retrieved_context = fetch_result.combined_text
-    arch_map_context = arch_map.to_llm_context()
     conversation_block = render_conversation_context(conversation_context)
 
     # ── Step 4: Answer ────────────────────────────────────────────────────────
     system_prompt = _build_answer_system_prompt(
         retrieved_context=retrieved_context,
-        arch_map_context=arch_map_context,
         truncated=fetch_result.truncated,
         routing_broadened=routing_broadened,
     )
@@ -414,7 +412,6 @@ async def _run_pageindex_mode(
     selected_doc_ids: list[str],
     master_tree_store: MasterTreeStore,
     storage: DocumentStore,
-    arch_map: ArchitectureMap,
     model: str,
     verbose: bool,
     reasoning_effort: str | None,
@@ -425,7 +422,6 @@ async def _run_pageindex_mode(
         selected_doc_ids=selected_doc_ids,
         master_tree_store=master_tree_store,
         storage=storage,
-        arch_map=arch_map,
         model=model,
         conversation_context=conversation_context,
         reasoning_effort=reasoning_effort,
@@ -468,6 +464,128 @@ def _build_query_metrics(
     )
 
 
+# ── Audit trace helpers ───────────────────────────────────────────────────────
+
+
+def _serialize_conversation(conv: ConversationContext) -> list[dict]:
+    """Normalise any ConversationContext shape into a JSON-serialisable list."""
+    if conv is None:
+        return []
+    if isinstance(conv, str):
+        return [{"role": "context", "content": conv}]
+    if isinstance(conv, list):
+        return [dict(turn) for turn in conv if isinstance(turn, dict)]
+    return []
+
+
+def _build_audit_trace(
+    *,
+    project: str,
+    model: str,
+    query: str,
+    conversation_context: ConversationContext,
+    result: "QueryResult",
+    router_capture: RouterCapture,
+    routing_broadened: bool,
+    routing_seconds: float,
+    chunks: list[RetrievedChunk],
+) -> "AuditTrace":
+    """Assemble a complete AuditTrace from the query pipeline outputs."""
+    from traces.schema import (
+        AuditTrace,
+        RouterTrace,
+        TraceMetrics,
+        TraceSection,
+        _context_window,
+        _estimate_cost,
+    )
+
+    sections_used: list[TraceSection] = [
+        TraceSection(
+            node_ref=c.node_ref,
+            doc_id=c.doc_id,
+            node_id=c.node_id,
+            title=c.title,
+            page_start=c.start_index,
+            page_end=c.end_index,
+            estimated_tokens=c.estimated_tokens,
+            truncated=c.truncated,
+            text=c.text,
+        )
+        for c in chunks
+    ]
+
+    context_tokens = (
+        sum(c.estimated_tokens for c in chunks)
+        if chunks
+        else len(result.retrieved_context) // 4  # rough estimate for pageindex mode
+    )
+
+    m = result.metrics
+    pipeline_seconds = max(0.0, (m.total_time_seconds if m else 0.0) - routing_seconds)
+
+    ctx_window = _context_window(model)
+    ctx_util = (
+        round(context_tokens / ctx_window, 4) if ctx_window and context_tokens else None
+    )
+    retr_ratio = (
+        round(context_tokens / m.prompt_tokens, 4)
+        if m and m.prompt_tokens
+        else None
+    )
+
+    trace_obj = result.trace
+    sections_dropped = 0
+    truncation_occurred = False
+    if trace_obj is not None:
+        truncation_occurred = trace_obj.truncated
+
+    metrics = TraceMetrics(
+        ttft_seconds=m.ttft_seconds if m else 0.0,
+        total_seconds=m.total_time_seconds if m else 0.0,
+        routing_seconds=routing_seconds,
+        pipeline_seconds=pipeline_seconds,
+        prompt_tokens=m.prompt_tokens if m else 0,
+        completion_tokens=m.completion_tokens if m else 0,
+        total_tokens=m.total_tokens if m else 0,
+        llm_calls=m.llm_calls if m else 0,
+        estimated_token_usage=m.estimated_token_usage if m else False,
+        context_tokens=context_tokens,
+        docs_routed=len(result.selected_docs),
+        sections_retrieved=len(sections_used),
+        sections_dropped_by_verifier=sections_dropped,
+        truncation_occurred=truncation_occurred,
+        routing_broadened=routing_broadened,
+        context_utilization_pct=ctx_util,
+        retrieval_token_ratio=retr_ratio,
+        estimated_cost_usd=_estimate_cost(
+            model,
+            m.prompt_tokens if m else 0,
+            m.completion_tokens if m else 0,
+        ),
+    )
+
+    return AuditTrace(
+        project=project,
+        model=model,
+        query=query,
+        conversation_snapshot=_serialize_conversation(conversation_context),
+        routing=RouterTrace(
+            context_snapshot=router_capture.context_snapshot,
+            raw_response=router_capture.raw_response,
+            broadened=routing_broadened,
+            selected_doc_ids=result.selected_docs,
+        ),
+        navigation_map=result.trace.navigation if result.trace else {},
+        sections_used=sections_used,
+        answer=result.answer,
+        retrieved_context_preview=result.retrieved_context[:500],
+        retrieval_mode=result.trace.retrieval_mode if result.trace else "hybrid",
+        verification_applied=result.trace.verification_applied if result.trace else False,
+        metrics=metrics,
+    )
+
+
 # ── Public entry point ────────────────────────────────────────────────────────
 
 
@@ -475,13 +593,14 @@ async def query(
     user_query: str,
     master_tree_store: MasterTreeStore,
     storage: DocumentStore,
-    arch_map: ArchitectureMap,
     model: str | None = None,
     conversation_context: ConversationContext = None,
     max_docs: int = 3,
     verbose: bool = False,
     reasoning_effort: str | None = None,
     answer_token_callback: Callable[[str], None] | None = None,
+    trace_service: "TraceService | None" = None,
+    project: str = "default",
 ) -> QueryResult:
     """Execute the complete retrieval workflow for one user question.
 
@@ -511,16 +630,19 @@ async def query(
         if answer_token_callback is not None:
             answer_token_callback(token)
 
+    router_capture = RouterCapture() if trace_service is not None else RouterCapture()
+    routing_started_at = time.perf_counter()
+
     with llm_usage_context():
         # ── Routing (shared by both modes) ────────────────────────────────────
         selected_doc_ids = await route_query(
             query=user_query,
             master_tree_store=master_tree_store,
-            arch_map=arch_map,
             model=model,
             max_docs=max_docs,
             conversation_context=conversation_context,
             reasoning_effort=reasoning_effort,
+            capture=router_capture,
         )
 
         routing_broadened = False
@@ -529,11 +651,11 @@ async def query(
             selected_doc_ids = await route_query_broadened(
                 query=user_query,
                 master_tree_store=master_tree_store,
-                arch_map=arch_map,
                 model=model,
                 max_docs=max_docs,
                 conversation_context=conversation_context,
                 reasoning_effort=reasoning_effort,
+                capture=router_capture,
             )
             if selected_doc_ids:
                 routing_broadened = True
@@ -541,6 +663,8 @@ async def query(
                     "Strict routing found no matches; broadened routing selected: %s",
                     selected_doc_ids,
                 )
+
+        routing_elapsed = max(0.0, time.perf_counter() - routing_started_at)
 
         if verbose:
             console.print(
@@ -555,7 +679,7 @@ async def query(
                 "even after a broadened search. Please check that the relevant "
                 "documents have been ingested."
             )
-            return QueryResult(
+            _no_match_result = QueryResult(
                 answer=answer,
                 selected_docs=[],
                 selected_nodes=[],
@@ -576,6 +700,20 @@ async def query(
                     ttft_seconds=first_token_elapsed,
                 ),
             )
+            if trace_service is not None:
+                _audit = _build_audit_trace(
+                    project=project,
+                    model=model,
+                    query=user_query,
+                    conversation_context=conversation_context,
+                    result=_no_match_result,
+                    router_capture=router_capture,
+                    routing_broadened=routing_broadened,
+                    routing_seconds=routing_elapsed,
+                    chunks=[],
+                )
+                asyncio.create_task(trace_service.write_trace(_audit))
+            return _no_match_result
 
         # ── PageIndex agentic mode ────────────────────────────────────────────
         if retrieval_mode == "pageindex":
@@ -586,13 +724,12 @@ async def query(
                     selected_doc_ids=selected_doc_ids,
                     master_tree_store=master_tree_store,
                     storage=storage,
-                    arch_map=arch_map,
                     model=model,
                     verbose=verbose,
                     reasoning_effort=reasoning_effort,
                 )
             )
-            return QueryResult(
+            _pi_result = QueryResult(
                 answer=answer,
                 selected_docs=selected_doc_ids,
                 selected_nodes=selected_nodes,
@@ -613,6 +750,20 @@ async def query(
                     ttft_seconds=first_token_elapsed,
                 ),
             )
+            if trace_service is not None:
+                _audit = _build_audit_trace(
+                    project=project,
+                    model=model,
+                    query=user_query,
+                    conversation_context=conversation_context,
+                    result=_pi_result,
+                    router_capture=router_capture,
+                    routing_broadened=routing_broadened,
+                    routing_seconds=routing_elapsed,
+                    chunks=[],
+                )
+                asyncio.create_task(trace_service.write_trace(_audit))
+            return _pi_result
 
         # ── Hybrid deterministic mode ─────────────────────────────────────────
         (
@@ -631,7 +782,6 @@ async def query(
             routing_broadened=routing_broadened,
             master_tree_store=master_tree_store,
             storage=storage,
-            arch_map=arch_map,
             model=model,
             verbose=verbose,
             reasoning_effort=reasoning_effort,
@@ -649,7 +799,7 @@ async def query(
             )
             for chunk in chunks
         ]
-        return QueryResult(
+        _hybrid_result = QueryResult(
             answer=answer,
             selected_docs=selected_doc_ids,
             selected_nodes=selected_nodes,
@@ -670,3 +820,17 @@ async def query(
                 ttft_seconds=first_token_elapsed,
             ),
         )
+        if trace_service is not None:
+            _audit = _build_audit_trace(
+                project=project,
+                model=model,
+                query=user_query,
+                conversation_context=conversation_context,
+                result=_hybrid_result,
+                router_capture=router_capture,
+                routing_broadened=routing_broadened,
+                routing_seconds=routing_elapsed,
+                chunks=chunks,
+            )
+            asyncio.create_task(trace_service.write_trace(_audit))
+        return _hybrid_result

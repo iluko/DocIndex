@@ -14,7 +14,7 @@ from rich.panel import Panel
 from rich.table import Table
 
 from ingestion.ingest import ingest_document
-from index_registry import build_runtime_components, delete_project, list_projects
+from index_registry import DEFAULT_PROJECT, build_runtime_components, delete_project, list_projects
 from retrieval.query_engine import query as run_query
 from utils import (
     REASONING_EFFORT_OPTIONS,
@@ -249,6 +249,8 @@ def query_command(
                 verbose=verbose,
                 reasoning_effort=normalize_reasoning_effort(reasoning_effort),
                 answer_token_callback=cb,
+                trace_service=runtime.trace_service,
+                project=runtime.index_context.project,
             )
         )
 
@@ -462,6 +464,178 @@ def reingest_command(
     )
     console.print(f"[green]Reingest complete:[/green] {doc_id}")
     console.print(JSON.from_data(master_node.model_dump(mode="json")))
+
+
+# ── Traces ────────────────────────────────────────────────────────────────────
+
+
+@cli.group("traces")
+def traces_group() -> None:
+    """Inspect and export query audit traces."""
+
+
+@traces_group.command("list")
+@click.option("--project", default=DEFAULT_PROJECT, show_default=True)
+@click.option("--limit", default=20, show_default=True, type=int)
+@click.option("--search", default=None, help="Filter traces by query substring.")
+def traces_list_command(project: str, limit: int, search: str | None) -> None:
+    """List recent query audit traces for a project."""
+    runtime = _build_runtime(DEFAULT_MODEL, project=project)
+    summaries = runtime.trace_service.list_traces(limit=limit, search=search)
+
+    if not summaries:
+        console.print(f"No traces found for project: {project}")
+        return
+
+    table = Table(title=f"Audit Traces — project: {project}", show_lines=False)
+    table.add_column("timestamp", style="dim", no_wrap=True)
+    table.add_column("trace_id", style="dim", no_wrap=True)
+    table.add_column("mode", no_wrap=True)
+    table.add_column("docs", justify="right")
+    table.add_column("sections", justify="right")
+    table.add_column("TTFT", justify="right")
+    table.add_column("total", justify="right")
+    table.add_column("routing", justify="right")
+    table.add_column("tokens", justify="right")
+    table.add_column("cost", justify="right")
+    table.add_column("query", max_width=55)
+
+    for s in summaries:
+        broadened_marker = " [B]" if s.routing_broadened else ""
+        cost_str = f"${s.estimated_cost_usd:.4f}" if s.estimated_cost_usd is not None else "—"
+        table.add_row(
+            s.timestamp.strftime("%Y-%m-%d %H:%M:%S"),
+            s.trace_id[:8],
+            f"{s.retrieval_mode}{broadened_marker}",
+            str(s.docs_routed),
+            str(s.sections_retrieved),
+            f"{s.ttft_seconds:.2f}s",
+            f"{s.total_seconds:.2f}s",
+            f"{s.routing_seconds:.2f}s",
+            f"{s.total_tokens:,}",
+            cost_str,
+            s.query_preview,
+        )
+
+    console.print(table)
+    console.print("[dim][B] = broadened routing was used[/dim]")
+
+
+@traces_group.command("show")
+@click.argument("trace_id")
+@click.option("--project", default=DEFAULT_PROJECT, show_default=True)
+@click.option("--raw", is_flag=True, default=False, help="Print raw JSON.")
+def traces_show_command(trace_id: str, project: str, raw: bool) -> None:
+    """Show the full audit trace for TRACE_ID."""
+    runtime = _build_runtime(DEFAULT_MODEL, project=project)
+    trace = runtime.trace_service.get_trace(trace_id)
+
+    if trace is None:
+        raise click.ClickException(
+            f"Trace '{trace_id}' not found in project '{project}'."
+        )
+
+    if raw:
+        console.print(JSON(json.dumps(trace.model_dump(mode="json"), indent=2)))
+        return
+
+    console.print(Panel(f"[bold]Query:[/bold] {trace.query}", title=f"Trace {trace.trace_id[:8]}"))
+
+    # Metrics
+    m = trace.metrics
+    console.print(
+        f"  TTFT: [cyan]{m.ttft_seconds:.2f}s[/cyan]"
+        f"  |  Total: [cyan]{m.total_seconds:.2f}s[/cyan]"
+        f"  |  Routing: [cyan]{m.routing_seconds:.2f}s[/cyan]"
+        f"  |  Pipeline: [cyan]{m.pipeline_seconds:.2f}s[/cyan]"
+    )
+    console.print(
+        f"  Tokens: [cyan]{m.total_tokens:,}[/cyan]"
+        f"  (prompt={m.prompt_tokens:,}  completion={m.completion_tokens:,}"
+        f"  llm_calls={m.llm_calls})"
+    )
+    if m.estimated_cost_usd is not None:
+        console.print(f"  Estimated cost: [cyan]${m.estimated_cost_usd:.6f}[/cyan]")
+    if m.context_utilization_pct is not None:
+        console.print(f"  Context utilization: [cyan]{m.context_utilization_pct * 100:.1f}%[/cyan]")
+
+    # Routing
+    console.print(
+        f"\n  Mode: [yellow]{trace.retrieval_mode}[/yellow]"
+        f"  |  Routing broadened: {'yes' if trace.routing.broadened else 'no'}"
+        f"  |  Verification: {'yes' if trace.verification_applied else 'no'}"
+    )
+    console.print(f"  Routed docs: {trace.routing.selected_doc_ids}")
+
+    # Sections
+    if trace.sections_used:
+        console.print(f"\n  Sections retrieved: {len(trace.sections_used)}")
+        for sec in trace.sections_used:
+            console.print(
+                f"    [{sec.doc_id}] {sec.title}  "
+                f"(p.{sec.page_start}–{sec.page_end}  ~{sec.estimated_tokens} tokens"
+                f"{'  truncated' if sec.truncated else ''})"
+            )
+
+    # Answer preview
+    console.print(
+        Panel(
+            trace.answer[:600] + ("…" if len(trace.answer) > 600 else ""),
+            title="Answer (preview)",
+            expand=False,
+        )
+    )
+
+
+@traces_group.command("stats")
+@click.option("--project", default=DEFAULT_PROJECT, show_default=True)
+def traces_stats_command(project: str) -> None:
+    """Show aggregated statistics for a project's audit traces."""
+    runtime = _build_runtime(DEFAULT_MODEL, project=project)
+    stats = runtime.trace_service.get_stats()
+
+    if stats.total_queries == 0:
+        console.print(f"No traces found for project: {project}")
+        return
+
+    table = Table(title=f"Trace Stats — project: {project}", show_header=False)
+    table.add_column("metric", style="bold")
+    table.add_column("value")
+    table.add_row("Total queries", str(stats.total_queries))
+    table.add_row("Avg latency", f"{stats.avg_latency_seconds:.2f}s")
+    table.add_row("Avg TTFT", f"{stats.avg_ttft_seconds:.2f}s")
+    table.add_row("Avg tokens", f"{stats.avg_tokens_total:,.0f}")
+    table.add_row("Avg docs routed", f"{stats.avg_docs_routed:.1f}")
+    table.add_row("Avg sections retrieved", f"{stats.avg_sections_retrieved:.1f}")
+    table.add_row("Broadened routing rate", f"{stats.broadened_routing_rate * 100:.1f}%")
+    if stats.total_estimated_cost_usd is not None:
+        table.add_row("Total estimated cost", f"${stats.total_estimated_cost_usd:.4f}")
+    console.print(table)
+
+    if stats.most_accessed_docs:
+        console.print("\nMost accessed docs:")
+        for doc_id, count in stats.most_accessed_docs:
+            console.print(f"  {doc_id}: {count} quer{'y' if count == 1 else 'ies'}")
+
+
+@traces_group.command("export")
+@click.option("--project", default=DEFAULT_PROJECT, show_default=True)
+@click.option(
+    "--format", "fmt",
+    type=click.Choice(["json", "csv"], case_sensitive=False),
+    default="json",
+    show_default=True,
+)
+@click.option("--limit", default=None, type=int, help="Max number of traces to export.")
+def traces_export_command(project: str, fmt: str, limit: int | None) -> None:
+    """Export all audit traces for a project as JSON or CSV (stdout)."""
+    runtime = _build_runtime(DEFAULT_MODEL, project=project)
+    if fmt == "json":
+        data = runtime.trace_service.export_json(limit=limit)
+        click.echo(json.dumps(data, indent=2, default=str))
+    else:
+        csv_str = runtime.trace_service.export_csv(limit=limit)
+        click.echo(csv_str, nl=False)
 
 
 if __name__ == "__main__":

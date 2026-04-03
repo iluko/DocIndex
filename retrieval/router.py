@@ -12,10 +12,10 @@ Two routing modes are available:
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass, field
 
 from dotenv import load_dotenv
 
-from arch_map.arch_map import ArchitectureMap
 from master_tree.master_tree import MasterTreeStore
 from utils import (
     ConversationContext,
@@ -30,6 +30,20 @@ from utils import (
 load_dotenv()
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class RouterCapture:
+    """Side-channel populated by route_query / route_query_broadened for audit traces.
+
+    Pass an instance to either routing function; it will be populated with the
+    exact context the router LLM received and its raw response.  This lets a
+    post-hoc analysis replay the original routing decision faithfully even if the
+    master tree changes later.
+    """
+
+    context_snapshot: str = field(default="")
+    raw_response: str = field(default="")
 
 
 async def _chat_completion(
@@ -56,11 +70,11 @@ async def _chat_completion(
 async def route_query(
     query: str,
     master_tree_store: MasterTreeStore,
-    arch_map: ArchitectureMap,
     model: str | None = None,
     max_docs: int = 3,
     conversation_context: ConversationContext = None,
     reasoning_effort: str | None = None,
+    capture: RouterCapture | None = None,
 ) -> list[str]:
     """Choose the most relevant document ids for a user query (strict mode).
 
@@ -74,14 +88,13 @@ async def route_query(
     if not available_doc_ids:
         return []
 
-    arch_map_context = arch_map.to_llm_context()
     master_tree_context = master_tree_store.to_llm_context()
     conversation_block = render_conversation_context(conversation_context)
 
     system_prompt = f"""
-You are a document routing agent. You have access to a multi-document index and
-a domain context map. Your job is to identify which documents in the index are
-most likely to contain a direct, substantive answer to the user's query.
+You are a document routing agent. You have access to a multi-document index.
+Your job is to identify which documents in the index are most likely to contain
+a direct, substantive answer to the user's query.
 
 Rules:
 - Select between 1 and {max_docs} documents.
@@ -91,9 +104,6 @@ Rules:
 - Return ONLY a JSON array of doc_id strings, ordered from most to least
   relevant. No explanation, no markdown.
 - Example: ["auth_spec", "rbac_overview"]
-
-Domain Context Map (use this to understand concept relationships):
-{arch_map_context}
 
 Master Tree (all indexed documents):
 {master_tree_context}
@@ -111,6 +121,10 @@ Select up to {max_docs} doc_ids. Return JSON array only.
         model, system_prompt, user_prompt, reasoning_effort=reasoning_effort
     )
 
+    if capture is not None:
+        capture.context_snapshot = f"Master Tree:\n{master_tree_context}"
+        capture.raw_response = response
+
     payload = parse_json_response(response)
     if not isinstance(payload, list):
         raise ValueError("Router response was not a JSON array.")
@@ -126,11 +140,11 @@ Select up to {max_docs} doc_ids. Return JSON array only.
 async def route_query_broadened(
     query: str,
     master_tree_store: MasterTreeStore,
-    arch_map: ArchitectureMap,
     model: str | None = None,
     max_docs: int = 3,
     conversation_context: ConversationContext = None,
     reasoning_effort: str | None = None,
+    capture: RouterCapture | None = None,
 ) -> list[str]:
     """Broadened fallback routing for queries that strict routing could not match.
 
@@ -147,7 +161,6 @@ async def route_query_broadened(
     if not available_doc_ids:
         return []
 
-    arch_map_context = arch_map.to_llm_context()
     master_tree_context = master_tree_store.to_llm_context()
     conversation_block = render_conversation_context(conversation_context)
 
@@ -166,9 +179,6 @@ Rules:
 - If truly nothing is related at all, return an empty array: []
 - Example: ["overview_doc", "related_spec"]
 
-Domain Context Map:
-{arch_map_context}
-
 Master Tree (all indexed documents):
 {master_tree_context}
 """.strip()
@@ -184,6 +194,10 @@ Select up to {max_docs} tangentially related doc_ids. Return JSON array only.
     response = await _chat_completion(
         model, system_prompt, user_prompt, reasoning_effort=reasoning_effort
     )
+
+    if capture is not None:
+        capture.context_snapshot = f"Master Tree:\n{master_tree_context}"
+        capture.raw_response = response
 
     payload = parse_json_response(response)
     if not isinstance(payload, list):

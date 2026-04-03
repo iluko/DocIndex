@@ -17,6 +17,7 @@ from ingestion.ingest import IngestionResult, ingest_document_with_trace
 from index_registry import DEFAULT_PROJECT, IndexContext, build_runtime_components, delete_project, list_projects
 from model_registry import ModelRegistry
 from retrieval.query_engine import QueryResult, SourceReference, query
+from traces.schema import AuditTrace, PostHocAnalysis
 from utils import (
     REASONING_EFFORT_OPTIONS,
     detect_llm_provider,
@@ -591,8 +592,8 @@ def render_query_trace(result: QueryResult | None) -> None:
             st.code(result.retrieved_context or "[empty]", language="markdown")
 
 
-def render_internal_map(master_tree_store, arch_map, index_context: IndexContext) -> None:
-    """Show the high-level architecture and currently loaded index artifacts."""
+def render_internal_map(master_tree_store, index_context: IndexContext) -> None:
+    """Show the master tree and currently loaded index artifacts."""
     st.markdown("### Internal Mapping")
     st.markdown(
         """
@@ -606,17 +607,8 @@ def render_internal_map(master_tree_store, arch_map, index_context: IndexContext
         f"Project: `{index_context.project}` — provider: `{index_context.provider}` — model: `{index_context.model}`"
     )
 
-    col_a, col_b = st.columns(2)
-    with col_a:
-        st.markdown("#### Master Tree")
-        st.json(master_tree_store.tree.model_dump(mode="json"))
-    with col_b:
-        st.markdown("#### Architecture Map")
-        arch_map_context = arch_map.to_llm_context()
-        if arch_map_context:
-            st.code(arch_map_context, language="json")
-        else:
-            st.info("No architecture map loaded.")
+    st.markdown("#### Master Tree")
+    st.json(master_tree_store.tree.model_dump(mode="json"))
 
 
 def _extract_tree_nodes(tree: dict | list | None) -> list[dict]:
@@ -750,6 +742,202 @@ def render_doc_browser(master_tree_store, storage, index_context: IndexContext) 
         st.json(per_doc_tree)
 
 
+def render_audit_log(runtime) -> None:
+    """Render the Audit Log tab — query history, metrics, and post-hoc analysis."""
+    service = runtime.trace_service
+
+    st.markdown("### Query Audit Log")
+    st.caption(
+        "Every query is recorded automatically. Use the Analyze button to run a "
+        "post-hoc explanation of routing decisions and section relevance — this "
+        "replays the exact context the system saw, not the current index state."
+    )
+
+    # ── Stats overview ────────────────────────────────────────────────────────
+    stats = service.get_stats()
+    if stats.total_queries == 0:
+        st.info("No queries recorded yet for this project. Ask a question in the Ask tab first.")
+        return
+
+    s_col1, s_col2, s_col3, s_col4, s_col5 = st.columns(5)
+    with s_col1:
+        render_metric("Total Queries", str(stats.total_queries))
+    with s_col2:
+        render_metric("Avg Latency", f"{stats.avg_latency_seconds:.2f}s")
+    with s_col3:
+        render_metric("Avg TTFT", f"{stats.avg_ttft_seconds:.2f}s")
+    with s_col4:
+        render_metric("Avg Tokens", f"{stats.avg_tokens_total:,.0f}")
+    with s_col5:
+        cost_str = f"${stats.total_estimated_cost_usd:.4f}" if stats.total_estimated_cost_usd is not None else "—"
+        render_metric("Total Est. Cost", cost_str)
+
+    broadened_pct = stats.broadened_routing_rate * 100
+    st.caption(
+        f"Broadened routing rate: **{broadened_pct:.1f}%** of queries needed fallback routing  |  "
+        f"Avg docs routed: **{stats.avg_docs_routed:.1f}**  |  "
+        f"Avg sections retrieved: **{stats.avg_sections_retrieved:.1f}**"
+    )
+
+    if stats.most_accessed_docs:
+        with st.expander("Most accessed documents", expanded=False):
+            for doc_id, count in stats.most_accessed_docs:
+                st.markdown(f"- `{doc_id}` — {count} quer{'y' if count == 1 else 'ies'}")
+
+    st.divider()
+
+    # ── Search + list ─────────────────────────────────────────────────────────
+    col_search, col_limit = st.columns([3, 1])
+    with col_search:
+        search_term = st.text_input("Search queries", placeholder="Filter by keyword…", label_visibility="collapsed")
+    with col_limit:
+        list_limit = st.selectbox("Show", [10, 25, 50, 100], index=0, label_visibility="collapsed")
+
+    summaries = service.list_traces(limit=list_limit, search=search_term or None)
+
+    if not summaries:
+        st.info("No traces match your search.")
+        return
+
+    # ── Per-trace rows ────────────────────────────────────────────────────────
+    for s in summaries:
+        broadened_badge = " 🔀" if s.routing_broadened else ""
+        cost_str = f" · ${s.estimated_cost_usd:.4f}" if s.estimated_cost_usd is not None else ""
+        label = (
+            f"`{s.timestamp.strftime('%Y-%m-%d %H:%M:%S')}` · "
+            f"**{s.retrieval_mode}{broadened_badge}** · "
+            f"TTFT {s.ttft_seconds:.2f}s · Total {s.total_seconds:.2f}s · "
+            f"{s.total_tokens:,} tok{cost_str} · "
+            f"{s.query_preview[:80]}{'…' if len(s.query_preview) >= 80 else ''}"
+        )
+        with st.expander(label, expanded=False):
+            trace = service.get_trace(s.trace_id)
+            if trace is None:
+                st.error("Trace data not found.")
+                continue
+
+            # Metrics row
+            mc1, mc2, mc3, mc4, mc5 = st.columns(5)
+            with mc1:
+                render_metric("TTFT", f"{trace.metrics.ttft_seconds:.2f}s")
+            with mc2:
+                render_metric("Total Time", f"{trace.metrics.total_seconds:.2f}s")
+            with mc3:
+                render_metric("Routing Time", f"{trace.metrics.routing_seconds:.2f}s")
+            with mc4:
+                render_metric("Pipeline Time", f"{trace.metrics.pipeline_seconds:.2f}s")
+            with mc5:
+                cost_val = (
+                    f"${trace.metrics.estimated_cost_usd:.6f}"
+                    if trace.metrics.estimated_cost_usd is not None
+                    else "—"
+                )
+                render_metric("Est. Cost", cost_val)
+
+            token_parts = [
+                f"Prompt: {trace.metrics.prompt_tokens:,}",
+                f"Completion: {trace.metrics.completion_tokens:,}",
+                f"Total: {trace.metrics.total_tokens:,}",
+                f"LLM calls: {trace.metrics.llm_calls}",
+            ]
+            if trace.metrics.context_utilization_pct is not None:
+                token_parts.append(f"Context utilization: {trace.metrics.context_utilization_pct * 100:.1f}%")
+            if trace.metrics.retrieval_token_ratio is not None:
+                token_parts.append(f"Retrieval ratio: {trace.metrics.retrieval_token_ratio * 100:.1f}%")
+            if trace.metrics.estimated_token_usage:
+                token_parts.append("⚠ includes token estimates")
+            st.caption("  ·  ".join(token_parts))
+
+            # Routing
+            routing_mode = f"{trace.retrieval_mode}" + (" (broadened)" if trace.routing.broadened else "")
+            st.markdown(
+                f"**Model:** `{trace.model}` · **Mode:** `{routing_mode}` · "
+                f"**Verification:** {'yes' if trace.verification_applied else 'no'}"
+            )
+            st.markdown(f"**Routed docs:** {', '.join(f'`{d}`' for d in trace.routing.selected_doc_ids) or 'none'}")
+
+            if trace.conversation_snapshot:
+                with st.expander("Conversation context at query time", expanded=False):
+                    st.json(trace.conversation_snapshot)
+
+            # Sections used
+            if trace.sections_used:
+                with st.expander(f"Sections retrieved ({len(trace.sections_used)})", expanded=False):
+                    for sec in trace.sections_used:
+                        st.markdown(
+                            f"""<div class="chunk-card">
+                            <strong>{sec.title}</strong> &nbsp;
+                            <code>{sec.node_ref}</code> &nbsp;
+                            p.{sec.page_start}–{sec.page_end} &nbsp;
+                            ~{sec.estimated_tokens} tokens
+                            {" &nbsp; <em>truncated</em>" if sec.truncated else ""}
+                            </div>""",
+                            unsafe_allow_html=True,
+                        )
+                        st.code(sec.text, language="markdown")
+            else:
+                st.caption("No section detail available (PageIndex mode).")
+
+            with st.expander("Navigation map", expanded=False):
+                st.json(trace.navigation_map)
+
+            with st.expander("Router context snapshot (what the router saw)", expanded=False):
+                st.caption("This is the exact master tree + arch map context that was passed to the routing LLM.")
+                st.code(trace.routing.context_snapshot, language="json")
+                st.caption("Router raw response:")
+                st.code(trace.routing.raw_response)
+
+            with st.expander("Answer", expanded=False):
+                st.markdown(trace.answer)
+
+            # Raw JSON download
+            st.download_button(
+                "Download raw JSON",
+                data=trace.model_dump_json(indent=2),
+                file_name=f"trace_{trace.trace_id[:8]}.json",
+                mime="application/json",
+                key=f"dl_{trace.trace_id}",
+            )
+
+            # ── Post-hoc analysis ─────────────────────────────────────────────
+            st.divider()
+            st.markdown("**Post-hoc Analysis**")
+            st.caption(
+                "Runs one LLM call to explain routing decisions and score each section's "
+                "relevance. Uses the exact context stored in this trace — not the current index."
+            )
+
+            analysis_key = f"analysis_{trace.trace_id}"
+            if analysis_key not in st.session_state:
+                st.session_state[analysis_key] = None
+
+            if st.button("Analyze this trace", key=f"btn_{trace.trace_id}"):
+                with st.spinner("Running post-hoc analysis…"):
+                    analysis = run_async_task(
+                        service.run_post_hoc_analysis(
+                            trace_id=trace.trace_id,
+                            model=runtime.index_context.model,
+                        )
+                    )
+                st.session_state[analysis_key] = analysis
+
+            analysis: PostHocAnalysis | None = st.session_state[analysis_key]
+            if analysis is not None:
+                st.markdown("**Routing explanation**")
+                st.info(analysis.routing_explanation)
+                if analysis.section_scores:
+                    st.markdown("**Section relevance scores**")
+                    for score in analysis.section_scores:
+                        bar_fill = "█" * score.score + "░" * (10 - score.score)
+                        st.markdown(
+                            f"`{score.node_ref}` — **{score.title}**  \n"
+                            f"Score: **{score.score}/10** `{bar_fill}`  \n"
+                            f"{score.explanation}"
+                        )
+                else:
+                    st.caption("No section scores available (PageIndex mode or no sections retrieved).")
+
+
 def main() -> None:
     """Assemble the full Streamlit application."""
     st.set_page_config(page_title="PageIndex Atlas", layout="wide")
@@ -787,7 +975,7 @@ def main() -> None:
         unsafe_allow_html=True,
     )
 
-    ingest_tab, ask_tab, docs_tab, map_tab = st.tabs(["Upload", "Ask", "Docs", "Map"])
+    ingest_tab, ask_tab, docs_tab, map_tab, audit_tab = st.tabs(["Upload", "Ask", "Docs", "Map", "Audit"])
 
     with ingest_tab:
         left, right = st.columns([1.05, 0.95])
@@ -893,13 +1081,14 @@ def main() -> None:
                             user_query=prompt,
                             master_tree_store=runtime.master_tree_store,
                             storage=runtime.storage,
-                            arch_map=runtime.arch_map,
                             model=model,
                             conversation_context=_current_history,
                             max_docs=max_docs,
                             verbose=False,
                             reasoning_effort=reasoning_effort,
                             answer_token_callback=_on_token,
+                            trace_service=runtime.trace_service,
+                            project=runtime.index_context.project,
                         )
                     )
                     token_queue.put(_STREAM_DONE)
@@ -952,7 +1141,10 @@ def main() -> None:
         render_doc_browser(runtime.master_tree_store, runtime.storage, runtime.index_context)
 
     with map_tab:
-        render_internal_map(runtime.master_tree_store, runtime.arch_map, runtime.index_context)
+        render_internal_map(runtime.master_tree_store, runtime.index_context)
+
+    with audit_tab:
+        render_audit_log(runtime)
 
 
 if __name__ == "__main__":

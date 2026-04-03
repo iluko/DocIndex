@@ -11,7 +11,6 @@ def test_default_project_used_when_none_given(tmp_path: Path, monkeypatch) -> No
     """Omitting --project should resolve to the 'default' project directory."""
     monkeypatch.setenv("LLM_PROVIDER", "openai")
     monkeypatch.setenv("LLM_MODEL", "gpt-4o")
-    (tmp_path / "arch_map.json").write_text('{"description":"","entities":[]}', encoding="utf-8")
 
     ctx = resolve_index_context(tmp_path)
 
@@ -23,7 +22,6 @@ def test_project_sets_index_directory(tmp_path: Path, monkeypatch) -> None:
     """A named project should resolve to its own isolated directory."""
     monkeypatch.setenv("LLM_PROVIDER", "openai")
     monkeypatch.setenv("LLM_MODEL", "gpt-4o")
-    (tmp_path / "arch_map.json").write_text('{"description":"","entities":[]}', encoding="utf-8")
 
     ctx = resolve_index_context(tmp_path, project="My Legal Docs")
 
@@ -34,7 +32,6 @@ def test_project_sets_index_directory(tmp_path: Path, monkeypatch) -> None:
 def test_model_does_not_affect_index_directory(tmp_path: Path, monkeypatch) -> None:
     """Switching models must not change which project directory is used."""
     monkeypatch.setenv("LLM_PROVIDER", "azure")
-    (tmp_path / "arch_map.json").write_text('{"description":"","entities":[]}', encoding="utf-8")
 
     ctx_a = resolve_index_context(tmp_path, model="gpt-4o", project="hr-docs")
     ctx_b = resolve_index_context(tmp_path, model="gpt-4.1", project="hr-docs")
@@ -66,7 +63,6 @@ def test_build_runtime_components_creates_project_directory(tmp_path: Path, monk
     monkeypatch.setenv("LLM_PROVIDER", "openai")
     monkeypatch.setenv("LLM_MODEL", "gpt-4o")
     monkeypatch.setenv("OPENAI_API_KEY", "test-key")
-    (tmp_path / "arch_map.json").write_text('{"description":"","entities":[]}', encoding="utf-8")
 
     runtime = build_runtime_components(tmp_path, project="research")
 

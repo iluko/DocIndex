@@ -12,6 +12,7 @@ data/uploads/
 data/doc_trees/
 data/derived_markdown/
 data/model_registry.json
+data/traces
 
 # Keep placeholder files so empty directories stay tracked
 !**/.gitkeep

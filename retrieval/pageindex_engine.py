@@ -21,7 +21,6 @@ from dataclasses import dataclass, field
 
 from dotenv import load_dotenv
 
-from arch_map.arch_map import ArchitectureMap
 from master_tree.master_tree import MasterTreeStore
 from retrieval.fetcher import _build_retrieved_chunk, _split_node_ref
 from storage.store import DocumentStore
@@ -272,7 +271,6 @@ async def run_pageindex_retrieval(
     selected_doc_ids: list[str],
     master_tree_store: MasterTreeStore,
     storage: DocumentStore,
-    arch_map: ArchitectureMap,
     model: str | None = None,
     conversation_context: ConversationContext = None,
     reasoning_effort: str | None = None,
@@ -293,15 +291,12 @@ async def run_pageindex_retrieval(
     model = model or get_default_model()
     client = get_async_client()
     doc_block = _doc_summary_block(selected_doc_ids, master_tree_store)
-    arch_context = arch_map.to_llm_context()
-    arch_block = f"\nDomain context:\n{arch_context}" if arch_context else ""
     conversation_block = render_conversation_context(conversation_context)
 
     system_prompt = f"""
 You are a document Q&A assistant. You have access to the following documents:
 
 {doc_block}
-{arch_block}
 
 Use the tools to explore document structure and fetch section content before
 answering. Strategy:
