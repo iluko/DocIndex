@@ -73,26 +73,45 @@ class MasterTreeStore:
         Junior note:
         We intentionally omit operational fields like file paths and timestamps
         so the router focuses on meaning, not storage details.
+
+        routing_facets are included when present (v1.1+ nodes).  Older nodes
+        that were ingested before the field existed will have routing_facets=None
+        and the router continues to work normally using the existing fields.
         """
         routing_docs = []
         for doc in self.tree.docs:
-            routing_docs.append(
-                {
-                    "doc_id": doc.doc_id,
-                    "doc_title": doc.doc_title,
-                    "doc_type": doc.doc_type,
-                    "doc_summary": doc.doc_summary,
-                    "key_topics": doc.key_topics,
-                    "relevance_hints": doc.relevance_hints.model_dump(),
-                    "top_sections": [
-                        {
-                            "title": section.title,
-                            "section_summary": section.section_summary,
-                        }
-                        for section in doc.top_sections
-                    ],
-                    "related_docs": doc.related_docs,
-                }
-            )
+            doc_entry: dict = {
+                "doc_id": doc.doc_id,
+                "doc_title": doc.doc_title,
+                "doc_type": doc.doc_type,
+                "doc_summary": doc.doc_summary,
+                "key_topics": doc.key_topics,
+                "relevance_hints": doc.relevance_hints.model_dump(),
+                "top_sections": [
+                    {
+                        "title": section.title,
+                        "section_summary": section.section_summary,
+                    }
+                    for section in doc.top_sections
+                ],
+                "related_docs": doc.related_docs,
+            }
+            if doc.routing_facets is not None:
+                facets = doc.routing_facets
+                # Only include non-empty lists so the prompt stays compact.
+                facet_entry: dict = {}
+                if facets.workflows:
+                    facet_entry["workflows"] = facets.workflows
+                if facets.actors:
+                    facet_entry["actors"] = facets.actors
+                if facets.systems:
+                    facet_entry["systems"] = facets.systems
+                if facets.edge_cases:
+                    facet_entry["edge_cases"] = facets.edge_cases
+                if facets.authority_hints:
+                    facet_entry["authority_hints"] = facets.authority_hints
+                if facet_entry:
+                    doc_entry["routing_facets"] = facet_entry
+            routing_docs.append(doc_entry)
 
         return compact_json({"version": self.tree.version, "docs": routing_docs})

@@ -16,14 +16,17 @@ from dotenv import load_dotenv
 from ingestion.ingest import IngestionResult, ingest_document_with_trace
 from index_registry import DEFAULT_PROJECT, IndexContext, build_runtime_components, delete_project, list_projects
 from model_registry import ModelRegistry
-from retrieval.query_engine import QueryResult, SourceReference, query
+from retrieval.query_engine import AdvancedRetrievalConfig, QueryResult, SourceReference, query
 from traces.schema import AuditTrace, PostHocAnalysis
 from utils import (
     REASONING_EFFORT_OPTIONS,
+    RETRIEVAL_MODE_OPTIONS,
     detect_llm_provider,
     get_default_model,
     get_master_top_sections_range,
     get_master_top_sections_target,
+    get_related_docs_mode,
+    get_retrieval_mode,
     validate_doc_id,
 )
 
@@ -261,8 +264,8 @@ def render_sidebar(
     master_tree_store,
     index_context: IndexContext,
     model_registry: ModelRegistry,
-) -> tuple[str, int, str | None, str]:
-    """Render runtime controls and return (model, max_docs, reasoning_effort, project)."""
+) -> tuple[str, int, str | None, str, AdvancedRetrievalConfig]:
+    """Render runtime controls and return (model, max_docs, reasoning_effort, project, adv_config)."""
     st.sidebar.markdown("## Project")
 
     # ── Project selector (primary) ────────────────────────────────────────────
@@ -360,6 +363,49 @@ def render_sidebar(
     )
     st.session_state["retrieval_reasoning_effort"] = reasoning_effort
 
+    retrieval_mode_options = list(RETRIEVAL_MODE_OPTIONS)
+    default_ret_mode = get_retrieval_mode()
+    default_ret_idx = retrieval_mode_options.index(default_ret_mode) if default_ret_mode in retrieval_mode_options else 0
+    retrieval_mode_ui = st.sidebar.selectbox(
+        "Retrieval mode",
+        options=retrieval_mode_options,
+        index=default_ret_idx,
+        help=(
+            "**hybrid** (default): deterministic, bounded, fast. Best for most questions.\n\n"
+            "**pageindex**: agentic tool-use loop. Higher latency and cost, but can explore "
+            "documents more deeply. Better for hard multi-document questions."
+        ),
+    )
+    if retrieval_mode_ui == "pageindex":
+        st.sidebar.caption(
+            ":warning: PageIndex mode uses more LLM calls and costs more. "
+            "Best for complex multi-document questions."
+        )
+
+    # ── Advanced retrieval controls ───────────────────────────────────────────
+    st.sidebar.markdown("## Advanced Retrieval")
+    adv_enabled = st.sidebar.toggle(
+        "Enable advanced retrieval",
+        value=False,
+        help=(
+            "Enables query-intent planning, adaptive retrieval width, and node-neighborhood "
+            "expansion. Improves completeness for broad/workflow questions at the cost of "
+            "higher latency and token usage."
+        ),
+    )
+    adv_config = AdvancedRetrievalConfig(enabled=adv_enabled)
+    if adv_enabled:
+        st.sidebar.caption(
+            ":warning: Higher latency and token cost. Best for broad, workflow, or "
+            "multi-document questions."
+        )
+        with st.sidebar.expander("Advanced options"):
+            adv_config.enable_planning = st.checkbox("Query planning", value=True, help="Classify query intent and recommend retrieval width.")
+            adv_config.enable_adaptive_width = st.checkbox("Adaptive width", value=True, help="Use planner output to adjust max docs/nodes.")
+            adv_config.enable_node_expansion = st.checkbox("Node expansion", value=True, help="Add bounded neighboring context around selected nodes.")
+            adv_config.max_docs_cap = st.slider("Max docs cap", min_value=1, max_value=10, value=6, help="Hard cap on docs routed in advanced mode.")
+            adv_config.max_nodes_cap = st.slider("Max nodes cap", min_value=1, max_value=10, value=6, help="Hard cap on nodes per doc in advanced mode.")
+
     st.sidebar.caption(f"Provider: `{detect_llm_provider()}`")
     st.sidebar.caption(f"Project: `{index_context.project}`")
     st.sidebar.caption(f"Model: `{model}`")
@@ -376,7 +422,7 @@ def render_sidebar(
     st.sidebar.markdown("## Storage")
     st.sidebar.caption(f"Project index at `{index_context.index_dir}`.")
 
-    return model, max_docs, None if reasoning_effort == "auto" else reasoning_effort, project
+    return model, max_docs, None if reasoning_effort == "auto" else reasoning_effort, project, adv_config, retrieval_mode_ui
 
 
 def save_uploaded_file(uploaded_file, doc_id: str) -> Path:
@@ -521,6 +567,18 @@ def render_ingestion_trace(result: IngestionResult | None) -> None:
     render_metric("Document", result.master_node.doc_title)
     render_metric("Doc ID", result.master_node.doc_id)
     render_metric("Tree Path", result.trace.tree_path)
+    render_metric("Relationship mode", result.trace.relationship_mode)
+
+    if result.trace.relationship_reconciliation is not None:
+        recon = result.trace.relationship_reconciliation
+        if recon.ran:
+            affected = ", ".join(recon.affected_doc_ids) or "none"
+            st.caption(
+                f"Reconciliation: mode=`{recon.mode}`, "
+                f"affected=`{affected}`"
+                + (", enhanced LLM ran" if recon.enhanced_ran else "")
+                + (", **fallback used**" if recon.fallback_used else "")
+            )
 
     st.markdown("#### Master Node Snapshot")
     st.json(result.master_node.model_dump(mode="json"))
@@ -568,6 +626,44 @@ def render_query_trace(result: QueryResult | None) -> None:
                 st.markdown(f"- **{src.doc_id}** — {src.section} *(p. {src.page_range})*")
 
     if result.trace is not None:
+        # Retrieval mode badge
+        mode_label = result.trace.retrieval_mode
+        if result.trace.routing_broadened:
+            mode_label += " (broadened)"
+        st.caption(f"Retrieval mode: `{mode_label}`")
+
+        # PageIndex agentic mode trace
+        if result.trace.retrieval_mode == "pageindex":
+            t = result.trace
+            pi_parts = [
+                f"**PageIndex mode**",
+                f"tool calls: {t.pageindex_tool_calls_made}/{t.pageindex_tool_call_budget}",
+                f"content tokens: {t.pageindex_content_tokens_used:,}/{t.pageindex_content_token_budget:,}",
+            ]
+            if t.pageindex_tool_budget_exhausted:
+                pi_parts.append("⚠ tool budget exhausted")
+            if t.pageindex_content_budget_exhausted:
+                pi_parts.append("⚠ content budget exhausted")
+            st.warning(" · ".join(pi_parts))
+            if t.pageindex_explored_docs:
+                st.caption(f"Explored docs: {', '.join(f'`{d}`' for d in t.pageindex_explored_docs)}")
+
+        # Advanced retrieval trace info
+        if result.trace.advanced_retrieval_enabled:
+            plan = result.trace.planner_output
+            adv_parts = [
+                f"**Advanced retrieval**: on",
+                f"max_docs={result.trace.effective_max_docs}",
+                f"max_nodes={result.trace.effective_max_nodes}",
+                f"expansion={'yes' if result.trace.node_expansion_applied else 'no'}",
+            ]
+            if plan:
+                adv_parts.append(f"query_type=`{plan.query_type}`")
+                adv_parts.append(f"broad={'yes' if plan.is_broad else 'no'}")
+            st.info(" · ".join(adv_parts))
+            if result.trace.expanded_node_refs:
+                st.caption(f"Expanded nodes: {', '.join(f'`{r}`' for r in result.trace.expanded_node_refs)}")
+
         with st.expander("Navigation Map", expanded=True):
             st.json(result.trace.navigation)
 
@@ -575,6 +671,7 @@ def render_query_trace(result: QueryResult | None) -> None:
             if not result.trace.fetched_chunks:
                 st.caption("No chunks retrieved.")
             for chunk in result.trace.fetched_chunks:
+                expansion_label = " · [expanded]" if chunk.is_expansion else ""
                 st.markdown(
                     f"""
                     <div class="chunk-card">
@@ -582,6 +679,7 @@ def render_query_trace(result: QueryResult | None) -> None:
                         <code>{chunk.node_ref}</code><br/>
                         Tokens: {chunk.estimated_tokens}
                         {" | Truncated" if chunk.truncated else ""}
+                        {expansion_label}
                     </div>
                     """,
                     unsafe_allow_html=True,
@@ -949,7 +1047,7 @@ def main() -> None:
     model_registry.ensure_model(active_model)
     active_project = st.session_state.get("project_name") or DEFAULT_PROJECT
     runtime = build_runtime(active_model, project=active_project)
-    model, max_docs, reasoning_effort, project = render_sidebar(
+    model, max_docs, reasoning_effort, project, adv_config, retrieval_mode_ui = render_sidebar(
         runtime.master_tree_store,
         runtime.index_context,
         model_registry,
@@ -1008,6 +1106,20 @@ def main() -> None:
                     f"Current prompt range: `{min_sections}-{max_sections}` sections. "
                     "Higher values improve routing detail but increase master-tree prompt size."
                 )
+                relationship_mode_options = ["off", "basic", "enhanced"]
+                default_rel_mode = get_related_docs_mode()
+                relationship_mode_ui = st.selectbox(
+                    "Relationship maintenance",
+                    options=relationship_mode_options,
+                    index=relationship_mode_options.index(default_rel_mode),
+                    help=(
+                        "Controls how related_docs links are maintained after ingestion. "
+                        "'off': no reconciliation (near-current behavior). "
+                        "'basic': deterministic symmetry and cleanup — no extra LLM calls. "
+                        "'enhanced': adds a bounded LLM pass to score candidate neighbors; "
+                        "falls back to basic on failure."
+                    ),
+                )
 
             if st.button("Run Ingestion", use_container_width=True):
                 if uploaded_file is None:
@@ -1021,6 +1133,7 @@ def main() -> None:
                         st.error(str(exc))
                     else:
                         saved_path = save_uploaded_file(uploaded_file, doc_id)
+                        _rel_mode = relationship_mode_ui
                         with st.status("Running ingestion", expanded=True) as status:
                             st.write(f"Saved upload to `{saved_path}`")
                             progress_handler = create_ingestion_progress_renderer(status)
@@ -1035,6 +1148,7 @@ def main() -> None:
                                     model=model,
                                     top_sections_target=int(top_sections_target),
                                     progress_callback=progress_callback,
+                                    relationship_mode=_rel_mode,
                                 ),
                                 on_progress=progress_handler,
                             )
@@ -1089,6 +1203,8 @@ def main() -> None:
                             answer_token_callback=_on_token,
                             trace_service=runtime.trace_service,
                             project=runtime.index_context.project,
+                            advanced_retrieval=adv_config,
+                            retrieval_mode=retrieval_mode_ui,
                         )
                     )
                     token_queue.put(_STREAM_DONE)

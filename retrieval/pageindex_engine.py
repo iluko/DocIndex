@@ -95,15 +95,34 @@ _TOOLS: list[dict] = [
 
 
 @dataclass
+class PageIndexEngineResult:
+    """Exploration metrics from one PageIndex agentic retrieval run.
+
+    Returned alongside the answer and accessed nodes so callers can populate
+    query traces without coupling to internal ``_AgentState``.
+    """
+
+    tool_calls_made: int
+    tool_call_budget: int
+    content_tokens_used: int
+    content_token_budget: int
+    explored_docs: list[str]
+    tool_budget_exhausted: bool
+    content_budget_exhausted: bool
+
+
+@dataclass
 class _AgentState:
     """Mutable state threaded through the tool-use loop."""
 
     messages: list[dict] = field(default_factory=list)
     retrieved_texts: list[str] = field(default_factory=list)
     accessed_nodes: list[str] = field(default_factory=list)
+    explored_docs: list[str] = field(default_factory=list)
     tool_calls_made: int = 0
     content_tokens: int = 0
     content_token_budget: int = 60000  # overridden at initialisation time
+    content_budget_exhausted: bool = False
 
 
 def _doc_summary_block(
@@ -172,6 +191,7 @@ def _execute_get_node_content(
         return json.dumps({"error": str(exc)})
 
     if state.content_tokens + chunk.estimated_tokens > state.content_token_budget:
+        state.content_budget_exhausted = True
         return json.dumps({
             "budget_exhausted": True,
             "message": (
@@ -193,6 +213,8 @@ def _dispatch_tool(name: str, raw_args: str, storage: DocumentStore, state: _Age
 
     if name == "get_document_structure":
         doc_id = args.get("doc_id", "")
+        if doc_id and doc_id not in state.explored_docs:
+            state.explored_docs.append(doc_id)
         return _execute_get_document_structure(doc_id, storage)
 
     if name == "get_node_content":
@@ -276,7 +298,7 @@ async def run_pageindex_retrieval(
     reasoning_effort: str | None = None,
     max_tool_calls: int = 12,
     model_max_tokens: int = 100000,
-) -> tuple[str, list[str], str]:
+) -> tuple[str, list[str], str, PageIndexEngineResult]:
     """Run PageIndex-style agentic retrieval for the pre-selected documents.
 
     Returns
@@ -287,6 +309,9 @@ async def run_pageindex_retrieval(
         Every ``doc_id::node_id`` the agent actually read.
     combined_context : str
         All node content the agent retrieved, concatenated.
+    engine_result : PageIndexEngineResult
+        Exploration metrics: tool call counts, budgets, explored docs, and
+        whether any budget was exhausted during the run.
     """
     model = model or get_default_model()
     client = get_async_client()
@@ -318,6 +343,7 @@ contain enough information, say so clearly.
     ]
 
     final_answer = ""
+    tool_budget_exhausted = False
 
     for iteration in range(max_tool_calls):
         response = await create_chat_completion_async(
@@ -387,6 +413,7 @@ contain enough information, say so clearly.
         )
     else:
         # Hit the cap — ask for a final answer with whatever was retrieved.
+        tool_budget_exhausted = True
         logger.warning(
             "PageIndex agent hit max_tool_calls=%d for query '%s…'. "
             "Requesting final answer.",
@@ -412,4 +439,13 @@ contain enough information, say so clearly.
         final_answer = extract_llm_text(final_response)
 
     combined_context = "\n\n".join(state.retrieved_texts)
-    return final_answer, state.accessed_nodes, combined_context
+    engine_result = PageIndexEngineResult(
+        tool_calls_made=state.tool_calls_made,
+        tool_call_budget=max_tool_calls,
+        content_tokens_used=state.content_tokens,
+        content_token_budget=state.content_token_budget,
+        explored_docs=list(state.explored_docs),
+        tool_budget_exhausted=tool_budget_exhausted,
+        content_budget_exhausted=state.content_budget_exhausted,
+    )
+    return final_answer, state.accessed_nodes, combined_context, engine_result

@@ -8,7 +8,7 @@ from datetime import datetime
 from dotenv import load_dotenv
 from pydantic import ValidationError
 
-from master_tree.schema import MasterNode, RelevanceHints, TopSection
+from master_tree.schema import MasterNode, RelevanceHints, RoutingFacets, TopSection
 from utils import (
     collect_node_ids,
     create_chat_completion_async,
@@ -42,6 +42,13 @@ Schema:
     "best_for": "<what queries this doc best answers>",
     "not_useful_for": "<what this doc does NOT cover>",
     "key_categories": ["<relevant category, concept area, or tag>", "..."]
+  },
+  "routing_facets": {
+    "workflows": ["<named workflow or process covered, e.g. 'user onboarding', 'token refresh'>", "..."],
+    "actors": ["<role, team, or stakeholder, e.g. 'admin', 'end user', 'compliance officer'>", "..."],
+    "systems": ["<system, module, or service, e.g. 'auth service', 'billing API', 'data pipeline'>", "..."],
+    "edge_cases": ["<error condition or non-happy-path, e.g. 'token expiry', 'rate limit exceeded'>", "..."],
+    "authority_hints": ["<scope or version qualifier, e.g. 'v2 only', 'EU region', 'deprecated'>", "..."]
   },
   "top_sections": [
     {
@@ -148,6 +155,31 @@ def _normalize_top_sections(
     )
 
 
+def _normalize_routing_facets(payload: dict) -> RoutingFacets:
+    """Extract and normalise routing_facets from the LLM response payload.
+
+    Returns an empty ``RoutingFacets`` when the field is absent or malformed so
+    the rest of the pipeline never sees a ``None`` on freshly ingested nodes.
+    """
+    raw = payload.get("routing_facets")
+    if not isinstance(raw, dict):
+        return RoutingFacets()
+
+    def _string_list(key: str) -> list[str]:
+        value = raw.get(key, [])
+        if not isinstance(value, list):
+            return []
+        return [str(item).strip() for item in value if str(item).strip()]
+
+    return RoutingFacets(
+        workflows=_string_list("workflows"),
+        actors=_string_list("actors"),
+        systems=_string_list("systems"),
+        edge_cases=_string_list("edge_cases"),
+        authority_hints=_string_list("authority_hints"),
+    )
+
+
 async def generate_master_node(
     doc_id: str,
     doc_title: str,
@@ -200,10 +232,16 @@ Instructions:
    domain tags that describe what this document relates to. These should be specific
    enough for a router to distinguish this document from others (e.g. "authentication",
    "error handling", "data pipeline", "compliance", "pricing model").
-6. For top_sections, select between {min_top_sections} and {max_top_sections} sections from the PageIndex tree that are most
+6. For routing_facets, extract short phrase lists (3-8 items each, or empty if not applicable):
+   - workflows: named end-to-end processes or workflows documented here
+   - actors: roles, teams, or stakeholders who perform actions or are affected
+   - systems: major systems, modules, APIs, or services described or referenced
+   - edge_cases: error conditions, failure modes, exceptions, or non-happy-path scenarios
+   - authority_hints: version, scope, or jurisdiction qualifiers (leave empty if none apply)
+7. For top_sections, select between {min_top_sections} and {max_top_sections} sections from the PageIndex tree that are most
    useful for routing. Each node_ref must be "{doc_id}::<node_id>" using the exact
    node_id from the tree.
-7. For related_docs, list doc_ids from the existing master tree that are meaningfully
+8. For related_docs, list doc_ids from the existing master tree that are meaningfully
    related (share topics, complement each other, or should be consulted together).
    If no documents are related, return an empty list.
 
@@ -245,6 +283,7 @@ Output only the JSON object. No markdown. No explanation.
                         payload.get("relevance_hints", {}).get("key_categories", [])
                     ),
                 ),
+                routing_facets=_normalize_routing_facets(payload),
                 top_sections=_normalize_top_sections(
                     doc_id,
                     per_doc_tree,

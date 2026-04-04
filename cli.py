@@ -15,12 +15,18 @@ from rich.table import Table
 
 from ingestion.ingest import ingest_document
 from index_registry import DEFAULT_PROJECT, build_runtime_components, delete_project, list_projects
-from retrieval.query_engine import query as run_query
+from retrieval.query_engine import AdvancedRetrievalConfig, query as run_query
 from utils import (
     REASONING_EFFORT_OPTIONS,
+    ADVANCED_RETRIEVAL_MAX_DOCS_CAP,
+    ADVANCED_RETRIEVAL_MAX_NODES_CAP,
     get_default_model,
     get_master_top_sections_target,
+    get_related_docs_mode,
+    get_retrieval_mode,
     normalize_reasoning_effort,
+    RELATED_DOCS_MODE_DEFAULT,
+    RETRIEVAL_MODE_OPTIONS,
     validate_doc_id,
 )
 
@@ -166,6 +172,19 @@ def init_command() -> None:
     type=click.IntRange(1, 12),
     help="Ingestion-only target for stored master-tree top sections. Prompt range becomes target-1 to target+1. Higher values improve routing detail but increase master-tree prompt size.",
 )
+@click.option(
+    "--relationship-mode",
+    "relationship_mode",
+    type=click.Choice(["off", "basic", "enhanced"], case_sensitive=False),
+    default=None,
+    help=(
+        "Ingestion-time relationship maintenance mode. "
+        "'off' preserves near-current behavior (no reconciliation). "
+        "'basic' (default) enforces symmetry, dedup, and bounded length deterministically. "
+        "'enhanced' adds a bounded LLM-assisted candidate-neighbor pass before reconciliation. "
+        "Defaults to the RELATED_DOCS_MODE env var (currently: basic)."
+    ),
+)
 @click.option("--project", default=None, help="Optional project namespace for index isolation.")
 def ingest(
     file_path: Path,
@@ -174,6 +193,7 @@ def ingest(
     doc_type: str,
     model: str,
     top_sections_target: int,
+    relationship_mode: str | None,
     project: str | None,
 ) -> None:
     """Ingest one source document into the active project index."""
@@ -181,6 +201,7 @@ def ingest(
         validate_doc_id(doc_id)
     except ValueError as exc:
         raise click.BadParameter(str(exc), param_hint="--doc-id") from exc
+    resolved_mode = relationship_mode or get_related_docs_mode()
     runtime = _build_runtime(model, project=project)
     master_node = asyncio.run(
         ingest_document(
@@ -192,9 +213,10 @@ def ingest(
             storage=runtime.storage,
             model=model,
             top_sections_target=top_sections_target,
+            relationship_mode=resolved_mode,
         )
     )
-    console.print(f"Project: {runtime.index_context.project}  |  Model: {model}")
+    console.print(f"Project: {runtime.index_context.project}  |  Model: {model}  |  Relationship mode: {resolved_mode}")
     console.print(JSON.from_data(master_node.model_dump(mode="json")))
 
 
@@ -211,6 +233,61 @@ def ingest(
 @click.option("--verbose", is_flag=True)
 @click.option("--stream", "use_stream", is_flag=True, default=False, help="Stream the answer token by token.")
 @click.option("--project", default=None, help="Optional project namespace for index isolation.")
+@click.option(
+    "--advanced",
+    "advanced_retrieval",
+    is_flag=True,
+    default=False,
+    help=(
+        "Enable advanced retrieval: query planning, adaptive width, and node-neighborhood "
+        "expansion. Better completeness for broad/workflow queries but higher latency and cost."
+    ),
+)
+@click.option(
+    "--no-planning",
+    is_flag=True,
+    default=False,
+    help="[Advanced] Disable query-intent planning when --advanced is on.",
+)
+@click.option(
+    "--no-adaptive-width",
+    is_flag=True,
+    default=False,
+    help="[Advanced] Disable adaptive retrieval width when --advanced is on.",
+)
+@click.option(
+    "--no-expansion",
+    is_flag=True,
+    default=False,
+    help="[Advanced] Disable node-neighborhood expansion when --advanced is on.",
+)
+@click.option(
+    "--max-docs-cap",
+    default=ADVANCED_RETRIEVAL_MAX_DOCS_CAP,
+    show_default=True,
+    type=click.IntRange(1, 10),
+    help="[Advanced] Hard cap on documents routed (advanced mode only).",
+)
+@click.option(
+    "--max-nodes-cap",
+    default=ADVANCED_RETRIEVAL_MAX_NODES_CAP,
+    show_default=True,
+    type=click.IntRange(1, 10),
+    help="[Advanced] Hard cap on nodes selected per document (advanced mode only).",
+)
+@click.option(
+    "--retrieval-mode",
+    "retrieval_mode",
+    type=click.Choice(list(RETRIEVAL_MODE_OPTIONS), case_sensitive=False),
+    default=None,
+    help=(
+        "Retrieval pipeline to use. "
+        "'hybrid' (default) is deterministic and bounded. "
+        "'pageindex' is an agentic tool-use loop with higher latency/cost but "
+        "potentially better completeness on hard multi-document questions. "
+        "Defaults to the RETRIEVAL_MODE env var (currently: hybrid)."
+    ),
+)
 def query_command(
     user_query: str,
     max_docs: int,
@@ -219,13 +296,45 @@ def query_command(
     verbose: bool,
     use_stream: bool,
     project: str | None,
+    advanced_retrieval: bool,
+    no_planning: bool,
+    no_adaptive_width: bool,
+    no_expansion: bool,
+    max_docs_cap: int,
+    max_nodes_cap: int,
+    retrieval_mode: str | None,
 ) -> None:
     """Run interactive querying with optional follow-up turns."""
     runtime = _build_runtime(model, project=project)
     chat_history: list[dict] = []
     current_query = user_query
+
+    adv_config = AdvancedRetrievalConfig(
+        enabled=advanced_retrieval,
+        enable_planning=not no_planning,
+        enable_adaptive_width=not no_adaptive_width,
+        enable_node_expansion=not no_expansion,
+        max_docs_cap=max_docs_cap,
+        max_nodes_cap=max_nodes_cap,
+    )
+
+    resolved_retrieval_mode = retrieval_mode or get_retrieval_mode()
+
     console.print(f"Project: {runtime.index_context.project}  |  Model: {model}")
-    console.print(f"Retrieval reasoning: {normalize_reasoning_effort(reasoning_effort) or 'auto'}")
+    console.print(
+        f"Retrieval mode: {resolved_retrieval_mode}"
+        f"  |  Reasoning: {normalize_reasoning_effort(reasoning_effort) or 'auto'}"
+    )
+    if resolved_retrieval_mode == "pageindex":
+        console.print(
+            "[yellow]PageIndex mode — agentic, higher latency/cost. "
+            "Better for hard multi-document questions.[/yellow]"
+        )
+    if advanced_retrieval:
+        console.print(
+            "[yellow]Advanced retrieval enabled — higher latency/cost, better "
+            "completeness for broad questions.[/yellow]"
+        )
 
     while True:
         if use_stream:
@@ -242,7 +351,6 @@ def query_command(
                 user_query=current_query,
                 master_tree_store=runtime.master_tree_store,
                 storage=runtime.storage,
-                arch_map=runtime.arch_map,
                 model=model,
                 conversation_context=chat_history,
                 max_docs=max_docs,
@@ -251,6 +359,8 @@ def query_command(
                 answer_token_callback=cb,
                 trace_service=runtime.trace_service,
                 project=runtime.index_context.project,
+                advanced_retrieval=adv_config,
+                retrieval_mode=resolved_retrieval_mode,
             )
         )
 
@@ -281,6 +391,32 @@ def query_command(
         if verbose:
             console.print(f"Selected docs: {result.selected_docs}")
             console.print(f"Selected nodes: {result.selected_nodes}")
+            if result.trace and result.trace.retrieval_mode == "pageindex":
+                t = result.trace
+                console.print(
+                    f"  PageIndex tool calls: {t.pageindex_tool_calls_made}/{t.pageindex_tool_call_budget}"
+                    f"  content tokens: {t.pageindex_content_tokens_used}/{t.pageindex_content_token_budget}"
+                )
+                if t.pageindex_explored_docs:
+                    console.print(f"  Explored docs: {t.pageindex_explored_docs}")
+                if t.pageindex_tool_budget_exhausted:
+                    console.print("[yellow]  ⚠ Tool-call budget exhausted[/yellow]")
+                if t.pageindex_content_budget_exhausted:
+                    console.print("[yellow]  ⚠ Content-token budget exhausted[/yellow]")
+            if result.trace and result.trace.advanced_retrieval_enabled:
+                plan = result.trace.planner_output
+                if plan:
+                    console.print(
+                        f"  Planner: type={plan.query_type} broad={plan.is_broad} "
+                        f"docs={plan.recommended_max_docs} nodes={plan.recommended_max_nodes}"
+                    )
+                console.print(
+                    f"  Effective: max_docs={result.trace.effective_max_docs} "
+                    f"max_nodes={result.trace.effective_max_nodes} "
+                    f"expansion={result.trace.node_expansion_applied}"
+                )
+                if result.trace.expanded_node_refs:
+                    console.print(f"  Expanded nodes: {result.trace.expanded_node_refs}")
             if result.sources:
                 console.print("Sources:")
                 for src in result.sources:
@@ -411,6 +547,16 @@ def delete_project_command(project_name: str, confirmed: bool) -> None:
     type=click.IntRange(1, 12),
     help="Ingestion-only target for stored master-tree top sections. Higher values improve routing detail but increase master-tree prompt size.",
 )
+@click.option(
+    "--relationship-mode",
+    "relationship_mode",
+    type=click.Choice(["off", "basic", "enhanced"], case_sensitive=False),
+    default=None,
+    help=(
+        "Ingestion-time relationship maintenance mode. "
+        "Defaults to the RELATED_DOCS_MODE env var (currently: basic)."
+    ),
+)
 @click.option("--yes", "confirmed", is_flag=True, default=False,
               help="Skip the confirmation prompt when a previous version exists.")
 @click.option("--project", default=None, help="Optional project namespace for index isolation.")
@@ -421,6 +567,7 @@ def reingest_command(
     doc_type: str,
     model: str,
     top_sections_target: int,
+    relationship_mode: str | None,
     confirmed: bool,
     project: str | None,
 ) -> None:
@@ -434,6 +581,7 @@ def reingest_command(
         validate_doc_id(doc_id)
     except ValueError as exc:
         raise click.BadParameter(str(exc), param_hint="--doc-id") from exc
+    resolved_mode = relationship_mode or get_related_docs_mode()
     runtime = _build_runtime(model, project=project)
     existing = runtime.master_tree_store.get_node(doc_id)
 
@@ -449,7 +597,7 @@ def reingest_command(
         console.print(f"Removing previous version of '{doc_id}'…")
         _delete_document(runtime, doc_id)
 
-    console.print(f"Ingesting '{doc_id}' into project: {runtime.index_context.project}  |  model: {model}")
+    console.print(f"Ingesting '{doc_id}' into project: {runtime.index_context.project}  |  model: {model}  |  relationship mode: {resolved_mode}")
     master_node = asyncio.run(
         ingest_document(
             file_path=str(file_path),
@@ -460,6 +608,7 @@ def reingest_command(
             storage=runtime.storage,
             model=model,
             top_sections_target=top_sections_target,
+            relationship_mode=resolved_mode,
         )
     )
     console.print(f"[green]Reingest complete:[/green] {doc_id}")

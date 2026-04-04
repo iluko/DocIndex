@@ -2,23 +2,32 @@
 
 Hybrid pipeline (RETRIEVAL_MODE=hybrid):
 
+  1. [Optional] Planner    — classify query intent and recommend retrieval width.
   1. Router           — pick 1–N most relevant documents (strict).
   1b. Broadened router — if strict routing returns empty, widen to tangentially
                          related documents and flag the answer as best-effort.
-  2. Navigator        — for each selected doc, pick 1–3 relevant sections
+  2. Navigator        — for each selected doc, pick 1–N relevant sections
                          (parallel, summary-first prompts).
   2b. Top-sections fallback — if navigator returns nothing for a doc, fall back
                                to the pre-computed top_sections from ingestion.
-  3. Verifier         — (optional, NAVIGATOR_VERIFICATION=true) drop sections
+  3. [Optional] Expander — add bounded neighboring nodes around primary selection.
+  4. Verifier         — (optional, NAVIGATOR_VERIFICATION=true) drop sections
                          that the LLM confirms do not address the query.
-  4. Fetcher          — extract raw text within token budget; each chunk is
+  5. Fetcher          — extract raw text within token budget; each chunk is
                          prefixed with its parent section context when available.
-  5. Answer LLM       — synthesise the final answer from retrieved context.
+  6. Answer LLM       — synthesise the final answer from retrieved context.
 
 PageIndex agentic mode (RETRIEVAL_MODE=pageindex):
 
   Router selects documents; an agentic tool-use loop then decides what to read
   and answers directly. See retrieval/pageindex_engine.py.
+
+Advanced retrieval (opt-in, ADVANCED_RETRIEVAL=true):
+
+  - Query planning classifies intent and recommends retrieval width.
+  - Adaptive width uses planner recommendations to set max_docs / max_nodes.
+  - Node-neighborhood expansion adds bounded context beyond primary nodes.
+  Standard mode is unchanged unless advanced retrieval is enabled.
 """
 
 from __future__ import annotations
@@ -33,9 +42,14 @@ from dotenv import load_dotenv
 from rich.console import Console
 
 from master_tree.master_tree import MasterTreeStore
-from retrieval.fetcher import RetrievedChunk, fetch_multiple_nodes_detailed
+from retrieval.fetcher import (
+    RetrievedChunk,
+    collect_expansion_node_refs,
+    fetch_multiple_nodes_detailed,
+)
 from retrieval.navigator import navigate_doc_tree
-from retrieval.pageindex_engine import run_pageindex_retrieval
+from retrieval.pageindex_engine import PageIndexEngineResult, run_pageindex_retrieval
+from retrieval.planner import QueryPlan, plan_query
 from retrieval.router import RouterCapture, route_query, route_query_broadened
 from retrieval.verifier import verify_navigation_batch
 from storage.store import DocumentStore
@@ -50,6 +64,12 @@ from utils import (
     get_llm_usage_tracker,
     get_navigator_verification_enabled,
     get_retrieval_mode,
+    get_advanced_retrieval_enabled,
+    get_query_planning_enabled,
+    get_adaptive_width_enabled,
+    get_node_expansion_enabled,
+    get_max_docs_cap,
+    get_max_nodes_cap,
     is_reasoning_effort_unsupported_error,
     is_stream_options_unsupported_error,
     is_temperature_unsupported_error,
@@ -76,6 +96,39 @@ console = Console()
 
 
 @dataclass
+class AdvancedRetrievalConfig:
+    """Policy bundle for the optional advanced retrieval features.
+
+    When ``enabled=False`` (the default), all sub-features are inactive and the
+    pipeline behaves identically to the pre-advanced-retrieval baseline.
+
+    When ``enabled=True``, each sub-feature can still be individually toggled.
+    The env-var accessors (``get_query_planning_enabled()`` etc.) provide the
+    defaults; pass explicit values to override them per-call.
+    """
+
+    enabled: bool = False
+    enable_planning: bool = True
+    enable_adaptive_width: bool = True
+    enable_node_expansion: bool = True
+    max_docs_cap: int = 6
+    max_nodes_cap: int = 6
+
+    @classmethod
+    def from_env(cls) -> "AdvancedRetrievalConfig":
+        """Construct an instance driven entirely by environment variables."""
+        enabled = get_advanced_retrieval_enabled()
+        return cls(
+            enabled=enabled,
+            enable_planning=get_query_planning_enabled(),
+            enable_adaptive_width=get_adaptive_width_enabled(),
+            enable_node_expansion=get_node_expansion_enabled(),
+            max_docs_cap=get_max_docs_cap(),
+            max_nodes_cap=get_max_nodes_cap(),
+        )
+
+
+@dataclass
 class QueryTrace:
     """Internal retrieval decisions captured for debugging and UI inspection."""
 
@@ -87,6 +140,22 @@ class QueryTrace:
     retrieval_mode: str = "hybrid"
     routing_broadened: bool = False
     verification_applied: bool = False
+    # Advanced retrieval metadata
+    advanced_retrieval_enabled: bool = False
+    planner_output: QueryPlan | None = None
+    effective_max_docs: int = 3
+    effective_max_nodes: int = 3
+    node_expansion_applied: bool = False
+    primary_node_refs: list[str] = field(default_factory=list)
+    expanded_node_refs: list[str] = field(default_factory=list)
+    # PageIndex agentic mode metrics (populated only when retrieval_mode="pageindex")
+    pageindex_tool_calls_made: int = 0
+    pageindex_tool_call_budget: int = 0
+    pageindex_content_tokens_used: int = 0
+    pageindex_content_token_budget: int = 0
+    pageindex_explored_docs: list[str] = field(default_factory=list)
+    pageindex_tool_budget_exhausted: bool = False
+    pageindex_content_budget_exhausted: bool = False
 
 
 @dataclass
@@ -275,6 +344,7 @@ async def _navigate_with_fallback(
     storage: DocumentStore,
     model: str,
     reasoning_effort: str | None,
+    max_nodes: int,
 ) -> list[str]:
     """Navigate within one document, falling back to top_sections when needed."""
     tree = storage.load_doc_tree(doc_id)
@@ -285,12 +355,13 @@ async def _navigate_with_fallback(
         model=model,
         conversation_context=conversation_context,
         reasoning_effort=reasoning_effort,
+        max_nodes=max_nodes,
     )
 
     if not node_refs:
         master_node = master_tree_store.get_node(doc_id)
         if master_node and master_node.top_sections:
-            node_refs = [s.node_ref for s in master_node.top_sections[:2]]
+            node_refs = [s.node_ref for s in master_node.top_sections[:max_nodes]]
             logger.info(
                 "Navigator returned empty for '%s'; using %d pre-computed "
                 "top_section(s) as fallback.",
@@ -311,16 +382,20 @@ async def _run_hybrid(
     model: str,
     verbose: bool,
     reasoning_effort: str | None,
+    max_nodes: int,
+    node_expansion: bool,
     answer_token_callback: Callable[[str], None] | None = None,
 ) -> tuple[
     str,            # answer
-    list[str],      # selected_nodes
+    list[str],      # selected_nodes (primary only)
     dict[str, list[str]],  # navigation_map
     list[RetrievedChunk],  # chunks
     int,            # token_budget
     bool,           # fetch_truncated
     str,            # retrieved_context
     bool,           # verification_applied
+    list[str],      # primary_node_refs
+    list[str],      # expanded_node_refs
 ]:
     """Execute the full hybrid deterministic pipeline for pre-selected documents."""
 
@@ -335,6 +410,7 @@ async def _run_hybrid(
                 storage=storage,
                 model=model,
                 reasoning_effort=reasoning_effort,
+                max_nodes=max_nodes,
             )
             for doc_id in selected_doc_ids
         ]
@@ -366,17 +442,34 @@ async def _run_hybrid(
                 f"{post_verification_count} node(s) retained."
             )
 
-    selected_nodes = [ref for refs in navigation_map.values() for ref in refs]
+    primary_node_refs = [ref for refs in navigation_map.values() for ref in refs]
 
     if verbose:
-        console.print(f"Nodes to fetch: {selected_nodes}")
+        console.print(f"Primary nodes to fetch: {primary_node_refs}")
 
-    # ── Step 3: Fetch ─────────────────────────────────────────────────────────
-    fetch_result = await fetch_multiple_nodes_detailed(selected_nodes, storage)
+    # ── Step 3: Node-neighborhood expansion (optional) ────────────────────────
+    expanded_node_refs: list[str] = []
+    if node_expansion and primary_node_refs:
+        loaded_trees: dict[str, dict] = {}
+        for doc_id in selected_doc_ids:
+            try:
+                loaded_trees[doc_id] = storage.load_doc_tree(doc_id)
+            except FileNotFoundError:
+                pass
+        expanded_node_refs = collect_expansion_node_refs(primary_node_refs, loaded_trees)
+        if verbose and expanded_node_refs:
+            console.print(f"Expansion nodes: {expanded_node_refs}")
+
+    # ── Step 4: Fetch ─────────────────────────────────────────────────────────
+    fetch_result = await fetch_multiple_nodes_detailed(
+        primary_node_refs,
+        storage,
+        expansion_refs=expanded_node_refs or None,
+    )
     retrieved_context = fetch_result.combined_text
     conversation_block = render_conversation_context(conversation_context)
 
-    # ── Step 4: Answer ────────────────────────────────────────────────────────
+    # ── Step 5: Answer ────────────────────────────────────────────────────────
     system_prompt = _build_answer_system_prompt(
         retrieved_context=retrieved_context,
         truncated=fetch_result.truncated,
@@ -393,13 +486,15 @@ async def _run_hybrid(
 
     return (
         answer,
-        selected_nodes,
+        primary_node_refs,
         navigation_map,
         fetch_result.chunks,
         fetch_result.token_budget,
         fetch_result.truncated,
         retrieved_context,
         verification_applied,
+        primary_node_refs,
+        expanded_node_refs,
     )
 
 
@@ -415,9 +510,9 @@ async def _run_pageindex_mode(
     model: str,
     verbose: bool,
     reasoning_effort: str | None,
-) -> tuple[str, list[str], dict[str, list[str]], str]:
+) -> tuple[str, list[str], dict[str, list[str]], str, PageIndexEngineResult]:
     """Execute the PageIndex agentic loop for pre-selected documents."""
-    answer, accessed_nodes, combined_context = await run_pageindex_retrieval(
+    answer, accessed_nodes, combined_context, engine_result = await run_pageindex_retrieval(
         user_query=user_query,
         selected_doc_ids=selected_doc_ids,
         master_tree_store=master_tree_store,
@@ -429,6 +524,16 @@ async def _run_pageindex_mode(
 
     if verbose:
         console.print(f"PageIndex agent accessed nodes: {accessed_nodes}")
+        console.print(
+            f"PageIndex tool calls: {engine_result.tool_calls_made}/{engine_result.tool_call_budget}"
+            f"  content tokens: {engine_result.content_tokens_used}/{engine_result.content_token_budget}"
+        )
+        if engine_result.explored_docs:
+            console.print(f"PageIndex explored docs: {engine_result.explored_docs}")
+        if engine_result.tool_budget_exhausted:
+            console.print("[yellow]PageIndex: tool-call budget exhausted.[/yellow]")
+        if engine_result.content_budget_exhausted:
+            console.print("[yellow]PageIndex: content-token budget exhausted.[/yellow]")
 
     navigation_map: dict[str, list[str]] = {doc_id: [] for doc_id in selected_doc_ids}
     for node_ref in accessed_nodes:
@@ -437,7 +542,7 @@ async def _run_pageindex_mode(
             if doc_id in navigation_map:
                 navigation_map[doc_id].append(node_ref)
 
-    return answer, accessed_nodes, navigation_map, combined_context
+    return answer, accessed_nodes, navigation_map, combined_context, engine_result
 
 
 def _build_query_metrics(
@@ -535,7 +640,6 @@ def _build_audit_trace(
     )
 
     trace_obj = result.trace
-    sections_dropped = 0
     truncation_occurred = False
     if trace_obj is not None:
         truncation_occurred = trace_obj.truncated
@@ -553,7 +657,7 @@ def _build_audit_trace(
         context_tokens=context_tokens,
         docs_routed=len(result.selected_docs),
         sections_retrieved=len(sections_used),
-        sections_dropped_by_verifier=sections_dropped,
+        sections_dropped_by_verifier=0,
         truncation_occurred=truncation_occurred,
         routing_broadened=routing_broadened,
         context_utilization_pct=ctx_util,
@@ -601,10 +705,13 @@ async def query(
     answer_token_callback: Callable[[str], None] | None = None,
     trace_service: "TraceService | None" = None,
     project: str = "default",
+    advanced_retrieval: AdvancedRetrievalConfig | None = None,
+    retrieval_mode: str | None = None,
 ) -> QueryResult:
     """Execute the complete retrieval workflow for one user question.
 
-    Retrieval mode is read from the ``RETRIEVAL_MODE`` env var:
+    Retrieval mode is read from the ``RETRIEVAL_MODE`` env var by default, or
+    can be overridden by passing ``retrieval_mode`` explicitly:
     - ``hybrid``    — deterministic navigator + verifier + fetcher pipeline.
     - ``pageindex`` — agentic tool-use loop.
 
@@ -616,11 +723,25 @@ async def query(
 
     The query engine consumes that context but does not mutate, persist, or
     return conversation state.
+
+    Advanced retrieval
+    ------------------
+    Pass ``advanced_retrieval=AdvancedRetrievalConfig(enabled=True)`` (or build
+    one via ``AdvancedRetrievalConfig.from_env()``) to enable optional features:
+    query planning, adaptive width, and node-neighborhood expansion.  When
+    ``advanced_retrieval`` is None the env-var defaults apply.
     """
     model = model or get_default_model()
-    retrieval_mode = get_retrieval_mode()
+    # Explicit retrieval_mode param takes precedence over the env-var default.
+    if retrieval_mode is None or retrieval_mode not in ("hybrid", "pageindex"):
+        retrieval_mode = get_retrieval_mode()
     query_started_at = time.perf_counter()
     first_token_elapsed: float | None = None
+
+    # Resolve advanced retrieval config.
+    if advanced_retrieval is None:
+        advanced_retrieval = AdvancedRetrievalConfig.from_env()
+    adv = advanced_retrieval
 
     def _wrapped_answer_token(token: str) -> None:
         """Capture end-to-end TTFT once, then forward streamed text onward."""
@@ -630,16 +751,46 @@ async def query(
         if answer_token_callback is not None:
             answer_token_callback(token)
 
-    router_capture = RouterCapture() if trace_service is not None else RouterCapture()
+    router_capture = RouterCapture()
     routing_started_at = time.perf_counter()
 
     with llm_usage_context():
+        # ── Optional query planning ───────────────────────────────────────────
+        plan: QueryPlan | None = None
+        if adv.enabled and adv.enable_planning:
+            plan = await plan_query(
+                query=user_query,
+                model=model,
+                hard_max_docs=adv.max_docs_cap,
+                hard_max_nodes=adv.max_nodes_cap,
+            )
+            if verbose and plan is not None:
+                console.print(
+                    f"Planner: type={plan.query_type} broad={plan.is_broad} "
+                    f"docs={plan.recommended_max_docs} nodes={plan.recommended_max_nodes} "
+                    f"expand={plan.use_node_expansion}"
+                )
+
+        # Determine effective width.
+        effective_max_docs = max_docs
+        effective_max_nodes = 3  # standard default
+        if adv.enabled and adv.enable_adaptive_width and plan is not None:
+            effective_max_docs = min(plan.recommended_max_docs, adv.max_docs_cap)
+            effective_max_nodes = min(plan.recommended_max_nodes, adv.max_nodes_cap)
+
+        # Determine whether node expansion is requested.
+        node_expansion = (
+            adv.enabled
+            and adv.enable_node_expansion
+            and (plan is None or plan.use_node_expansion)
+        )
+
         # ── Routing (shared by both modes) ────────────────────────────────────
         selected_doc_ids = await route_query(
             query=user_query,
             master_tree_store=master_tree_store,
             model=model,
-            max_docs=max_docs,
+            max_docs=effective_max_docs,
             conversation_context=conversation_context,
             reasoning_effort=reasoning_effort,
             capture=router_capture,
@@ -652,7 +803,7 @@ async def query(
                 query=user_query,
                 master_tree_store=master_tree_store,
                 model=model,
-                max_docs=max_docs,
+                max_docs=effective_max_docs,
                 conversation_context=conversation_context,
                 reasoning_effort=reasoning_effort,
                 capture=router_capture,
@@ -669,7 +820,8 @@ async def query(
         if verbose:
             console.print(
                 f"Routing → {selected_doc_ids} "
-                f"[mode={retrieval_mode}, broadened={routing_broadened}]"
+                f"[mode={retrieval_mode}, broadened={routing_broadened}, "
+                f"advanced={adv.enabled}]"
             )
 
         # ── Hard no-match path ────────────────────────────────────────────────
@@ -694,6 +846,11 @@ async def query(
                     retrieval_mode=retrieval_mode,
                     routing_broadened=False,
                     verification_applied=False,
+                    advanced_retrieval_enabled=adv.enabled,
+                    planner_output=plan,
+                    effective_max_docs=effective_max_docs,
+                    effective_max_nodes=effective_max_nodes,
+                    node_expansion_applied=False,
                 ),
                 metrics=_build_query_metrics(
                     query_started_at,
@@ -717,7 +874,7 @@ async def query(
 
         # ── PageIndex agentic mode ────────────────────────────────────────────
         if retrieval_mode == "pageindex":
-            answer, selected_nodes, navigation_map, retrieved_context = (
+            answer, selected_nodes, navigation_map, retrieved_context, pi_engine = (
                 await _run_pageindex_mode(
                     user_query=user_query,
                     conversation_context=conversation_context,
@@ -744,6 +901,18 @@ async def query(
                     retrieval_mode="pageindex",
                     routing_broadened=routing_broadened,
                     verification_applied=False,
+                    advanced_retrieval_enabled=adv.enabled,
+                    planner_output=plan,
+                    effective_max_docs=effective_max_docs,
+                    effective_max_nodes=effective_max_nodes,
+                    node_expansion_applied=False,
+                    pageindex_tool_calls_made=pi_engine.tool_calls_made,
+                    pageindex_tool_call_budget=pi_engine.tool_call_budget,
+                    pageindex_content_tokens_used=pi_engine.content_tokens_used,
+                    pageindex_content_token_budget=pi_engine.content_token_budget,
+                    pageindex_explored_docs=pi_engine.explored_docs,
+                    pageindex_tool_budget_exhausted=pi_engine.tool_budget_exhausted,
+                    pageindex_content_budget_exhausted=pi_engine.content_budget_exhausted,
                 ),
                 metrics=_build_query_metrics(
                     query_started_at,
@@ -775,6 +944,8 @@ async def query(
             fetch_truncated,
             retrieved_context,
             verification_applied,
+            primary_node_refs,
+            expanded_node_refs,
         ) = await _run_hybrid(
             user_query=user_query,
             conversation_context=conversation_context,
@@ -785,6 +956,8 @@ async def query(
             model=model,
             verbose=verbose,
             reasoning_effort=reasoning_effort,
+            max_nodes=effective_max_nodes,
+            node_expansion=node_expansion,
             answer_token_callback=(
                 _wrapped_answer_token if answer_token_callback is not None else None
             ),
@@ -814,6 +987,13 @@ async def query(
                 retrieval_mode="hybrid",
                 routing_broadened=routing_broadened,
                 verification_applied=verification_applied,
+                advanced_retrieval_enabled=adv.enabled,
+                planner_output=plan,
+                effective_max_docs=effective_max_docs,
+                effective_max_nodes=effective_max_nodes,
+                node_expansion_applied=node_expansion and bool(expanded_node_refs),
+                primary_node_refs=primary_node_refs,
+                expanded_node_refs=expanded_node_refs,
             ),
             metrics=_build_query_metrics(
                 query_started_at,

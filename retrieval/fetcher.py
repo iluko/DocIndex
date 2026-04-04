@@ -9,14 +9,14 @@ what that parent section establishes.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import logging
 import re
 from pathlib import Path
 
 from ingestion.docx_converter import docx_to_markdown
 from storage.store import DocumentStore
-from utils import estimate_tokens, find_parent_node, find_tree_node
+from utils import estimate_tokens, find_parent_node, find_tree_node, iter_tree_nodes
 
 try:
     import fitz
@@ -40,6 +40,8 @@ class RetrievedChunk:
     text: str
     estimated_tokens: int
     truncated: bool = False
+    is_expansion: bool = False
+    """True when this chunk was added via node-neighborhood expansion, not primary navigation."""
 
 
 @dataclass
@@ -136,7 +138,7 @@ def _build_parent_context_header(
     a fetched chunk as if it stands alone.
 
     Returns an empty string when:
-    - The node has no parent (it is a root section).
+    - The node has no parent (it is a root-level node).
     - The parent exists but carries no ``prefix_summary``.
     - The ``prefix_summary`` is blank after stripping.
     """
@@ -161,6 +163,7 @@ def _build_retrieved_chunk(
     node_ref: str,
     per_doc_tree: dict,
     file_path: str,
+    is_expansion: bool = False,
 ) -> RetrievedChunk:
     """Resolve one node reference into a chunk object with estimated tokens.
 
@@ -190,7 +193,8 @@ def _build_retrieved_chunk(
         raise ValueError(f"Unsupported document type for node fetch: {suffix}")
 
     parent_header = _build_parent_context_header(node_id, per_doc_tree)
-    section_header = f"[{doc_id} :: {title} :: pages {start_index}-{end_index}]"
+    expansion_marker = "[expanded context] " if is_expansion else ""
+    section_header = f"[{expansion_marker}{doc_id} :: {title} :: pages {start_index}-{end_index}]"
     text = f"{parent_header}{section_header}\n\n{body}"
 
     return RetrievedChunk(
@@ -202,6 +206,7 @@ def _build_retrieved_chunk(
         end_index=end_index,
         text=text,
         estimated_tokens=estimate_tokens(text),
+        is_expansion=is_expansion,
     )
 
 
@@ -223,7 +228,134 @@ def _truncate_chunk(chunk: RetrievedChunk, remaining_tokens: int) -> RetrievedCh
         text=truncated_text,
         estimated_tokens=estimate_tokens(truncated_text),
         truncated=True,
+        is_expansion=chunk.is_expansion,
     )
+
+
+def _find_sibling_node_ids(per_doc_tree: dict, node_id: str) -> list[str]:
+    """Return node_ids of siblings (same parent, excluding self).
+
+    Siblings are nodes that share the same parent in the tree.  For root-level
+    nodes, siblings are other root-level nodes.
+    """
+    target = str(node_id)
+
+    def _children_of_parent(nodes: list) -> list[str] | None:
+        """DFS: find the sibling list containing target, return their ids."""
+        for node in nodes:
+            children: list = node.get("nodes") or []
+            for child in children:
+                if str(child.get("node_id")) == target:
+                    # Found the parent — return all sibling ids except self.
+                    return [
+                        str(c.get("node_id"))
+                        for c in children
+                        if c.get("node_id") and str(c.get("node_id")) != target
+                    ]
+            result = _children_of_parent(children)
+            if result is not None:
+                return result
+        return None
+
+    root_nodes: list = []
+    if isinstance(per_doc_tree, dict):
+        root_nodes = per_doc_tree.get("structure") or per_doc_tree.get("nodes") or []
+
+    # Check if target is a root-level node first.
+    root_ids = [str(n.get("node_id")) for n in root_nodes if n.get("node_id")]
+    if target in root_ids:
+        return [nid for nid in root_ids if nid != target]
+
+    result = _children_of_parent(root_nodes)
+    return result or []
+
+
+def _find_first_child_node_id(per_doc_tree: dict, node_id: str) -> str | None:
+    """Return the first child node_id of ``node_id``, or None if it has no children."""
+    node = find_tree_node(per_doc_tree, node_id)
+    if node is None:
+        return None
+    children: list = node.get("nodes") or []
+    if not children:
+        return None
+    first_child_id = children[0].get("node_id")
+    return str(first_child_id) if first_child_id else None
+
+
+def _find_parent_node_id(per_doc_tree: dict, node_id: str) -> str | None:
+    """Return the parent's node_id, or None when ``node_id`` is a root node."""
+    parent = find_parent_node(per_doc_tree, node_id)
+    if parent is None:
+        return None
+    pid = parent.get("node_id")
+    return str(pid) if pid else None
+
+
+def collect_expansion_node_refs(
+    primary_node_refs: list[str],
+    per_doc_trees: dict[str, dict],
+    max_siblings: int = 1,
+) -> list[str]:
+    """Build a bounded list of expansion node refs around the primary selection.
+
+    Strategy (in priority order, per primary node):
+    1. One adjacent sibling (first sibling not already selected).
+    2. First child node of the primary (if the node is broad/top-level).
+    3. Parent node (if the primary is a leaf and the parent adds context).
+
+    Expansion candidates are de-duplicated against each other and against
+    primary_node_refs.  The caller is responsible for enforcing the token budget
+    — this function only selects candidates, not their content.
+
+    Parameters
+    ----------
+    primary_node_refs:
+        Already-selected ``doc_id::node_id`` refs (not mutated).
+    per_doc_trees:
+        Dict mapping doc_id → per-document tree dict.
+    max_siblings:
+        Maximum number of sibling candidates to emit per primary node.
+        Keep this small (1) to avoid flooding the context.
+    """
+    primary_set: set[str] = set(primary_node_refs)
+    expansion_refs: list[str] = []
+    seen: set[str] = set(primary_node_refs)
+
+    for node_ref in primary_node_refs:
+        doc_id, node_id = _split_node_ref(node_ref)
+        tree = per_doc_trees.get(doc_id)
+        if tree is None:
+            continue
+
+        # 1. One adjacent sibling.
+        sibling_ids = _find_sibling_node_ids(tree, node_id)
+        siblings_added = 0
+        for sib_id in sibling_ids:
+            if siblings_added >= max_siblings:
+                break
+            sib_ref = f"{doc_id}::{sib_id}"
+            if sib_ref not in seen:
+                expansion_refs.append(sib_ref)
+                seen.add(sib_ref)
+                siblings_added += 1
+
+        # 2. First child (useful when primary is a broad section).
+        child_id = _find_first_child_node_id(tree, node_id)
+        if child_id:
+            child_ref = f"{doc_id}::{child_id}"
+            if child_ref not in seen:
+                expansion_refs.append(child_ref)
+                seen.add(child_ref)
+
+        # 3. Parent (useful when primary is a very narrow leaf node).
+        parent_id = _find_parent_node_id(tree, node_id)
+        if parent_id:
+            parent_ref = f"{doc_id}::{parent_id}"
+            if parent_ref not in seen:
+                expansion_refs.append(parent_ref)
+                seen.add(parent_ref)
+
+    return expansion_refs
 
 
 def fetch_node_content(
@@ -239,15 +371,25 @@ async def fetch_multiple_nodes_detailed(
     node_refs: list[str],
     storage: DocumentStore,
     model_max_tokens: int = 100000,
+    expansion_refs: list[str] | None = None,
 ) -> FetchResult:
-    """Fetch multiple node refs in order while staying under the model token budget."""
+    """Fetch multiple node refs in order while staying under the model token budget.
+
+    Primary ``node_refs`` are fetched first and take priority over the budget.
+    Optional ``expansion_refs`` are fetched afterwards if budget allows; they are
+    marked with ``is_expansion=True`` on the resulting chunks.
+    """
     token_budget = int(model_max_tokens * 0.7)
     total_tokens = 0
     retrieved_chunks: list[RetrievedChunk] = []
     loaded_trees: dict[str, dict] = {}
     truncated = False
 
-    for node_ref in node_refs:
+    all_refs = list(node_refs) + list(expansion_refs or [])
+    primary_set: set[str] = set(node_refs)
+
+    for node_ref in all_refs:
+        is_expansion = node_ref not in primary_set
         doc_id, _ = _split_node_ref(node_ref)
 
         try:
@@ -255,7 +397,9 @@ async def fetch_multiple_nodes_detailed(
                 loaded_trees[doc_id] = storage.load_doc_tree(doc_id)
 
             file_path = storage.load_doc_source_path(doc_id)
-            chunk = _build_retrieved_chunk(node_ref, loaded_trees[doc_id], file_path)
+            chunk = _build_retrieved_chunk(
+                node_ref, loaded_trees[doc_id], file_path, is_expansion=is_expansion
+            )
         except (FileNotFoundError, ImportError, KeyError, ValueError) as exc:
             logger.warning("Skipping node '%s': %s", node_ref, exc)
             continue
@@ -267,7 +411,8 @@ async def fetch_multiple_nodes_detailed(
 
         remaining_tokens = token_budget - total_tokens
         truncated = True
-        if remaining_tokens > 0:
+        if remaining_tokens > 0 and not is_expansion:
+            # Only truncate primary nodes; skip expansion chunks when budget is tight.
             retrieved_chunks.append(_truncate_chunk(chunk, remaining_tokens))
         break
 

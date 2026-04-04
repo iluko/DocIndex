@@ -285,6 +285,112 @@ def get_navigator_verification_enabled() -> bool:
     }
 
 
+# ── Advanced retrieval configuration ─────────────────────────────────────────
+
+ADVANCED_RETRIEVAL_MAX_DOCS_CAP: int = 6
+ADVANCED_RETRIEVAL_MAX_NODES_CAP: int = 6
+
+
+def get_advanced_retrieval_enabled() -> bool:
+    """Return whether advanced retrieval is globally enabled.
+
+    Controlled by ``ADVANCED_RETRIEVAL=true`` in the environment.
+    Disabled by default — standard mode remains the fastest path.
+    When enabled, individual sub-features (planning, adaptive width, node
+    expansion) are also on unless explicitly disabled via their own env vars.
+    """
+    return os.getenv("ADVANCED_RETRIEVAL", "false").strip().lower() in {
+        "true", "1", "yes"
+    }
+
+
+def get_query_planning_enabled() -> bool:
+    """Return whether query-intent planning is active (requires advanced retrieval).
+
+    Controlled by ``QUERY_PLANNING``.  Defaults to ``true`` when advanced
+    retrieval is on.  Set ``QUERY_PLANNING=false`` to disable planning while
+    keeping other advanced features active.
+    """
+    return os.getenv("QUERY_PLANNING", "true").strip().lower() not in {
+        "false", "0", "no"
+    }
+
+
+def get_adaptive_width_enabled() -> bool:
+    """Return whether adaptive retrieval width is active (requires advanced retrieval).
+
+    Controlled by ``ADAPTIVE_RETRIEVAL_WIDTH``.  Defaults to ``true`` when
+    advanced retrieval is on.
+    """
+    return os.getenv("ADAPTIVE_RETRIEVAL_WIDTH", "true").strip().lower() not in {
+        "false", "0", "no"
+    }
+
+
+def get_node_expansion_enabled() -> bool:
+    """Return whether bounded node-neighborhood expansion is active.
+
+    Controlled by ``NODE_EXPANSION``.  Defaults to ``true`` when advanced
+    retrieval is on.  Expansion adds sibling/parent context beyond the primary
+    selected nodes, capped by the token budget.
+    """
+    return os.getenv("NODE_EXPANSION", "true").strip().lower() not in {
+        "false", "0", "no"
+    }
+
+
+def get_max_docs_cap() -> int:
+    """Return the hard cap on the number of documents the router may select.
+
+    Controlled by ``MAX_DOCS_CAP`` (default 6).  Applied in advanced mode only.
+    """
+    try:
+        return max(1, int(os.getenv("MAX_DOCS_CAP", str(ADVANCED_RETRIEVAL_MAX_DOCS_CAP))))
+    except ValueError:
+        return ADVANCED_RETRIEVAL_MAX_DOCS_CAP
+
+
+def get_max_nodes_cap() -> int:
+    """Return the hard cap on nodes the navigator may select per document.
+
+    Controlled by ``MAX_NODES_CAP`` (default 6).  Applied in advanced mode only.
+    """
+    try:
+        return max(1, int(os.getenv("MAX_NODES_CAP", str(ADVANCED_RETRIEVAL_MAX_NODES_CAP))))
+    except ValueError:
+        return ADVANCED_RETRIEVAL_MAX_NODES_CAP
+
+
+# ── Related-docs relationship maintenance ─────────────────────────────────────
+
+RELATED_DOCS_MODE_DEFAULT: str = "basic"
+"""Default ingestion-time relationship maintenance mode."""
+
+RELATED_DOCS_MODES: frozenset[str] = frozenset({"off", "basic", "enhanced"})
+
+
+def get_related_docs_mode() -> str:
+    """Return the ingestion-time related-docs relationship maintenance mode.
+
+    Controlled by ``RELATED_DOCS_MODE`` in the environment.
+
+    Modes
+    -----
+    off       Preserve near-current behavior.  No reconciliation is run after
+              master-node generation.
+    basic     (default) Deterministic reconciliation: no self-links, dedup,
+              bounded length, and symmetric direct relationships.  No extra
+              LLM calls.
+    enhanced  Adds a bounded LLM-assisted pass that scores candidate neighbors
+              via structured metadata overlap before refreshing the new doc's
+              related_docs.  Falls back to basic on failure.
+    """
+    raw = os.getenv("RELATED_DOCS_MODE", RELATED_DOCS_MODE_DEFAULT).strip().lower()
+    if raw not in RELATED_DOCS_MODES:
+        return RELATED_DOCS_MODE_DEFAULT
+    return raw
+
+
 def parse_json_response(content: str) -> Any:
     """Parse JSON from plain text, including common LLM markdown wrappers.
 

@@ -9,6 +9,7 @@ from types import SimpleNamespace
 import retrieval.pageindex_engine as engine_module
 from retrieval.fetcher import RetrievedChunk
 from retrieval.pageindex_engine import (
+    PageIndexEngineResult,
     _AgentState,
     _assistant_message_from_response,
     _dispatch_tool,
@@ -218,7 +219,7 @@ def test_run_pageindex_retrieval_direct_answer(monkeypatch) -> None:
     master_tree_store = SimpleNamespace(get_node=lambda d: None)
 
 
-    answer, accessed_nodes, combined_context = asyncio.run(
+    answer, accessed_nodes, combined_context, engine_result = asyncio.run(
         run_pageindex_retrieval(
             user_query="What is X?",
             selected_doc_ids=["doc1"],
@@ -231,6 +232,7 @@ def test_run_pageindex_retrieval_direct_answer(monkeypatch) -> None:
     assert answer == "The direct answer."
     assert accessed_nodes == []
     assert combined_context == ""
+    assert engine_result.tool_calls_made == 0
 
 
 def test_run_pageindex_retrieval_tool_call_then_answer(monkeypatch) -> None:
@@ -252,7 +254,7 @@ def test_run_pageindex_retrieval_tool_call_then_answer(monkeypatch) -> None:
     master_tree_store = SimpleNamespace(get_node=lambda d: None)
 
 
-    answer, accessed_nodes, combined_context = asyncio.run(
+    answer, accessed_nodes, combined_context, engine_result = asyncio.run(
         run_pageindex_retrieval(
             user_query="Tell me about doc1.",
             selected_doc_ids=["doc1"],
@@ -264,6 +266,7 @@ def test_run_pageindex_retrieval_tool_call_then_answer(monkeypatch) -> None:
 
     assert answer == "Final answer after tool use."
     assert accessed_nodes == []  # get_document_structure calls don't count as accessed
+    assert engine_result.tool_calls_made == 1  # one get_document_structure call
 
 
 def test_run_pageindex_retrieval_max_tool_calls_prompts_final_answer(monkeypatch) -> None:
@@ -297,7 +300,7 @@ def test_run_pageindex_retrieval_max_tool_calls_prompts_final_answer(monkeypatch
     master_tree_store = SimpleNamespace(get_node=lambda d: None)
 
 
-    answer, _, _ = asyncio.run(
+    answer, _, _, engine_result = asyncio.run(
         run_pageindex_retrieval(
             user_query="What is X?",
             selected_doc_ids=["doc1"],
@@ -311,3 +314,145 @@ def test_run_pageindex_retrieval_max_tool_calls_prompts_final_answer(monkeypatch
     assert answer == "Best answer with limited context."
     # max_tool_calls=2 loop + 1 forced final call = 3 total LLM calls
     assert call_count == 3
+    assert engine_result.tool_budget_exhausted is True
+    assert engine_result.tool_call_budget == 2
+
+
+# ── PageIndexEngineResult ─────────────────────────────────────────────────────
+
+def test_engine_result_fields_on_direct_answer(monkeypatch) -> None:
+    """A direct-answer run should produce zeroed-out engine metrics."""
+    _patch_engine(monkeypatch, [_dict_response("Direct.")])
+    storage = SimpleNamespace(load_doc_tree=lambda d: {}, load_doc_source_path=lambda d: "")
+    master_tree_store = SimpleNamespace(get_node=lambda d: None)
+
+    _, _, _, er = asyncio.run(
+        run_pageindex_retrieval(
+            user_query="Q?",
+            selected_doc_ids=["doc1"],
+            master_tree_store=master_tree_store,
+            storage=storage,
+        )
+    )
+
+    assert isinstance(er, PageIndexEngineResult)
+    assert er.tool_calls_made == 0
+    assert er.tool_call_budget == 12  # default
+    assert er.content_tokens_used == 0
+    assert er.explored_docs == []
+    assert er.tool_budget_exhausted is False
+    assert er.content_budget_exhausted is False
+
+
+def test_explored_docs_tracked_on_get_document_structure(monkeypatch) -> None:
+    """Calling get_document_structure should add the doc to explored_docs."""
+    tc = {"id": "c1", "function": {"name": "get_document_structure", "arguments": '{"doc_id": "doc1"}'}}
+    responses = [_dict_response(None, tool_calls=[tc]), _dict_response("Done.")]
+    _patch_engine(monkeypatch, responses)
+
+    def load_raises(doc_id):
+        raise FileNotFoundError("no tree")
+
+    storage = SimpleNamespace(load_doc_tree=load_raises, load_doc_source_path=lambda d: "")
+    master_tree_store = SimpleNamespace(get_node=lambda d: None)
+
+    _, _, _, er = asyncio.run(
+        run_pageindex_retrieval(
+            user_query="Q?",
+            selected_doc_ids=["doc1"],
+            master_tree_store=master_tree_store,
+            storage=storage,
+        )
+    )
+
+    assert "doc1" in er.explored_docs
+    assert er.tool_calls_made == 1
+
+
+def test_explored_docs_deduped(monkeypatch) -> None:
+    """The same doc_id appearing in two get_document_structure calls counts once."""
+    tc = {"id": "c1", "function": {"name": "get_document_structure", "arguments": '{"doc_id": "doc1"}'}}
+    responses = [
+        _dict_response(None, tool_calls=[tc]),
+        _dict_response(None, tool_calls=[tc]),
+        _dict_response("Done."),
+    ]
+    _patch_engine(monkeypatch, responses)
+
+    def load_raises(doc_id):
+        raise FileNotFoundError("no tree")
+
+    storage = SimpleNamespace(load_doc_tree=load_raises, load_doc_source_path=lambda d: "")
+    master_tree_store = SimpleNamespace(get_node=lambda d: None)
+
+    _, _, _, er = asyncio.run(
+        run_pageindex_retrieval(
+            user_query="Q?",
+            selected_doc_ids=["doc1"],
+            master_tree_store=master_tree_store,
+            storage=storage,
+        )
+    )
+
+    assert er.explored_docs == ["doc1"]
+
+
+def test_content_budget_exhausted_flag_set(monkeypatch) -> None:
+    """Hitting the content token budget should set content_budget_exhausted."""
+    big_chunk = RetrievedChunk(
+        node_ref="doc1::0001", doc_id="doc1", node_id="0001",
+        title="S", start_index=0, end_index=5, text="T", estimated_tokens=9999,
+    )
+    monkeypatch.setattr(engine_module, "_build_retrieved_chunk", lambda *a: big_chunk)
+
+    tc = {"id": "c1", "function": {"name": "get_node_content", "arguments": '{"doc_id":"doc1","node_id":"0001"}'}}
+    responses = [_dict_response(None, tool_calls=[tc]), _dict_response("Answer.")]
+    _patch_engine(monkeypatch, responses)
+
+    storage = SimpleNamespace(
+        load_doc_tree=lambda d: {"nodes": [{"node_id": "0001", "title": "S"}]},
+        load_doc_source_path=lambda d: "/fake/path.md",
+    )
+    master_tree_store = SimpleNamespace(get_node=lambda d: None)
+
+    _, _, _, er = asyncio.run(
+        run_pageindex_retrieval(
+            user_query="Q?",
+            selected_doc_ids=["doc1"],
+            master_tree_store=master_tree_store,
+            storage=storage,
+            model_max_tokens=100,   # very small → tiny content_token_budget
+        )
+    )
+
+    assert er.content_budget_exhausted is True
+
+
+# ── Retrieval mode plumbing in query_engine ───────────────────────────────────
+
+def test_dispatch_tool_tracks_explored_docs() -> None:
+    """_dispatch_tool should add doc_id to state.explored_docs on get_document_structure."""
+    state = _AgentState()
+    storage = SimpleNamespace(load_doc_tree=lambda d: (_ for _ in ()).throw(FileNotFoundError("no tree")))
+
+    def load_raises(doc_id):
+        raise FileNotFoundError("no tree")
+
+    storage2 = SimpleNamespace(load_doc_tree=load_raises)
+    _dispatch_tool("get_document_structure", '{"doc_id":"alpha"}', storage2, state)
+
+    assert "alpha" in state.explored_docs
+
+
+def test_dispatch_tool_explored_docs_not_duplicated() -> None:
+    """Calling get_document_structure twice for the same doc should only add once."""
+    state = _AgentState()
+
+    def load_raises(doc_id):
+        raise FileNotFoundError("no tree")
+
+    storage = SimpleNamespace(load_doc_tree=load_raises)
+    _dispatch_tool("get_document_structure", '{"doc_id":"alpha"}', storage, state)
+    _dispatch_tool("get_document_structure", '{"doc_id":"alpha"}', storage, state)
+
+    assert state.explored_docs.count("alpha") == 1

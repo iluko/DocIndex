@@ -14,6 +14,11 @@ from rich.console import Console
 from ingestion.docx_converter import docx_to_markdown
 from ingestion.master_node_gen import generate_master_node
 from master_tree.master_tree import MasterTreeStore
+from master_tree.relationships import (
+    ReconciliationResult,
+    reconcile_relationships_basic,
+    reconcile_relationships_enhanced,
+)
 from master_tree.schema import MasterNode
 from storage.store import DocumentStore
 from utils import (
@@ -24,11 +29,14 @@ from utils import (
     get_default_model,
     get_master_top_sections_range,
     get_master_top_sections_target,
+    get_related_docs_mode,
     INGESTION_REASONING_EFFORT,
     iter_tree_nodes,
     patch_pageindex_llm_helpers,
     patch_pageindex_progress_hooks,
     progress_context,
+    RELATED_DOCS_MODE_DEFAULT,
+    RELATED_DOCS_MODES,
 )
 
 load_dotenv()
@@ -60,6 +68,10 @@ class IngestionTrace:
     file_type: str
     tree_path: str = ""
     steps: list[IngestionStep] = field(default_factory=list)
+    relationship_mode: str = RELATED_DOCS_MODE_DEFAULT
+    """The relationship maintenance mode used during this ingestion."""
+    relationship_reconciliation: ReconciliationResult | None = None
+    """Reconciliation trace, present when mode is basic or enhanced."""
 
 
 @dataclass
@@ -262,6 +274,7 @@ async def _ingest_document_impl(
     pageindex_opts: dict | None = None,
     top_sections_target: int | None = None,
     progress_callback: Callable[[dict], None] | None = None,
+    relationship_mode: str | None = None,
 ) -> IngestionResult:
     """Shared implementation behind both simple and traced ingestion APIs."""
     with progress_context(progress_callback):
@@ -271,11 +284,17 @@ async def _ingest_document_impl(
         model = model or get_default_model()
         resolved_top_sections_target = get_master_top_sections_target(top_sections_target)
         top_sections_range = get_master_top_sections_range(resolved_top_sections_target)
+        resolved_relationship_mode = (
+            relationship_mode
+            if relationship_mode is not None and relationship_mode in RELATED_DOCS_MODES
+            else get_related_docs_mode()
+        )
         path = Path(file_path).expanduser().resolve()
         trace = IngestionTrace(
             doc_id=doc_id,
             file_path=str(path),
             file_type=path.suffix.lower(),
+            relationship_mode=resolved_relationship_mode,
         )
 
         _append_trace(
@@ -291,6 +310,7 @@ async def _ingest_document_impl(
                 "master_top_sections_target": resolved_top_sections_target,
                 "master_top_sections_range": list(top_sections_range),
                 "pageindex_overrides": pageindex_opts or {},
+                "relationship_mode": resolved_relationship_mode,
             },
         )
 
@@ -381,6 +401,38 @@ async def _ingest_document_impl(
 
         console.print(f"[cyan]Updating master tree for[/cyan] {doc_id}")
         master_tree_store.add_node(master_node)
+
+        # Relationship reconciliation (basic / enhanced)
+        if resolved_relationship_mode != "off":
+            all_nodes = master_tree_store.list_docs()
+            if resolved_relationship_mode == "enhanced":
+                console.print(
+                    f"[cyan]Reconciling relationships (enhanced) for[/cyan] {doc_id}"
+                )
+                affected_nodes, recon_result = await reconcile_relationships_enhanced(
+                    new_doc_id=doc_id,
+                    nodes=all_nodes,
+                    model=model,
+                )
+            else:
+                console.print(
+                    f"[cyan]Reconciling relationships (basic) for[/cyan] {doc_id}"
+                )
+                affected_nodes, recon_result = reconcile_relationships_basic(
+                    new_doc_id=doc_id,
+                    nodes=all_nodes,
+                )
+            for node in affected_nodes:
+                master_tree_store.add_node(node)
+            trace.relationship_reconciliation = recon_result
+            _append_trace(
+                trace,
+                "reconcile_relationships",
+                f"Reconciled related_docs links for {doc_id} and its neighborhood "
+                f"({len(recon_result.affected_doc_ids)} doc(s) affected).",
+                recon_result.to_dict(),
+            )
+
         master_tree_store.save(master_tree_store.tree)
         console.print(f"[green]Ingestion complete:[/green] {doc_id}")
 
@@ -419,6 +471,7 @@ async def ingest_document(
     pageindex_opts: dict | None = None,
     top_sections_target: int | None = None,
     progress_callback: Callable[[dict], None] | None = None,
+    relationship_mode: str | None = None,
 ) -> MasterNode:
     """Ingest one document and return only the master-tree node."""
     result = await _ingest_document_impl(
@@ -432,6 +485,7 @@ async def ingest_document(
         pageindex_opts=pageindex_opts,
         top_sections_target=top_sections_target,
         progress_callback=progress_callback,
+        relationship_mode=relationship_mode,
     )
     return result.master_node
 
@@ -447,6 +501,7 @@ async def ingest_document_with_trace(
     pageindex_opts: dict | None = None,
     top_sections_target: int | None = None,
     progress_callback: Callable[[dict], None] | None = None,
+    relationship_mode: str | None = None,
 ) -> IngestionResult:
     """Ingest one document and return the tree plus a detailed trace."""
     return await _ingest_document_impl(
@@ -460,4 +515,5 @@ async def ingest_document_with_trace(
         pageindex_opts=pageindex_opts,
         top_sections_target=top_sections_target,
         progress_callback=progress_callback,
+        relationship_mode=relationship_mode,
     )

@@ -22,6 +22,9 @@ load_dotenv()
 
 logger = logging.getLogger(__name__)
 
+_STANDARD_MAX_NODES = 3
+"""Default node selection limit used in standard (non-advanced) mode."""
+
 
 def _format_tree_for_navigation(per_doc_tree: dict) -> str:
     """Render the document tree as a flat, readable node list for the LLM.
@@ -82,14 +85,23 @@ async def navigate_doc_tree(
     model: str | None = None,
     conversation_context: ConversationContext = None,
     reasoning_effort: str | None = None,
+    max_nodes: int = _STANDARD_MAX_NODES,
 ) -> list[str]:
     """Select the most relevant node refs inside one per-document PageIndex tree.
 
     Returns a list of ``doc_id::node_id`` strings ordered by relevance.
     Returns an empty list when no valid nodes can be identified (caller should
     fall back to the document's pre-computed top_sections).
+
+    Parameters
+    ----------
+    max_nodes:
+        Upper bound on nodes to select.  Standard mode uses 3.  Advanced mode
+        may pass a higher value (up to ``MAX_NODES_CAP``) based on the planner's
+        recommendation.
     """
     model = model or get_default_model()
+    max_nodes = max(1, max_nodes)
     valid_node_ids = collect_node_ids(per_doc_tree)
     if not valid_node_ids:
         return []
@@ -97,12 +109,12 @@ async def navigate_doc_tree(
     conversation_block = render_conversation_context(conversation_context)
     node_list = _format_tree_for_navigation(per_doc_tree)
 
-    system_prompt = """
+    system_prompt = f"""
 You are a document navigation agent. You are given a flat list of every section
 (node) in a single document. Each entry shows the node ID, section title, page
 range, and a short summary of the section's content.
 
-Your task: identify the 1–3 nodes most likely to contain the answer to the query.
+Your task: identify the 1–{max_nodes} nodes most likely to contain the answer to the query.
 Return a JSON array of node_id strings ordered by relevance, e.g. ["0003", "0007"].
 Return only the node_id values — no doc_id prefix, no markdown, no explanation.
 If no node is relevant, return an empty array: []
@@ -131,7 +143,7 @@ Return JSON array of node_ids only.
         raise ValueError("Navigator response was not a JSON array.")
 
     node_refs: list[str] = []
-    for node_id in payload[:3]:
+    for node_id in payload[:max_nodes]:
         if str(node_id) not in valid_node_ids:
             # We warn and skip instead of failing hard because LLM navigation is
             # probabilistic and occasionally returns a near-miss node id.
