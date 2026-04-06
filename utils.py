@@ -17,7 +17,7 @@ import os
 import re
 import threading
 import time
-from contextlib import contextmanager
+from contextlib import asynccontextmanager, contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Iterator, Union
@@ -1060,6 +1060,27 @@ def get_async_client(api_key: str | None = None) -> "AsyncOpenAI":
         client_kwargs["base_url"] = config.base_url
 
     return AsyncOpenAI(**client_kwargs)
+
+
+@asynccontextmanager
+async def managed_async_client(
+    client: Any | None = None,
+    api_key: str | None = None,
+):
+    """Yield an async client and close it when the object supports cleanup."""
+    if client is None:
+        client = get_async_client(api_key)
+    if hasattr(client, "__aenter__") and hasattr(client, "__aexit__"):
+        async with client as managed:
+            yield managed
+        return
+
+    try:
+        yield client
+    finally:
+        aclose = getattr(client, "aclose", None)
+        if callable(aclose):
+            await aclose()
 
 
 def _pageindex_messages(prompt: str, chat_history: list[dict] | None = None) -> list[dict]:

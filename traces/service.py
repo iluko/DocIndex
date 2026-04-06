@@ -203,7 +203,13 @@ class TraceService:
         tree consultation.  The router's exact context snapshot is replayed so the
         explanation mirrors the original decision rather than the current index state.
         """
-        from utils import create_chat_completion_async, extract_llm_text, get_async_client, parse_json_response
+        from utils import (
+            create_chat_completion_async,
+            extract_llm_text,
+            get_async_client,
+            managed_async_client,
+            parse_json_response,
+        )
 
         trace = self._store.load(trace_id)
         if trace is None:
@@ -253,16 +259,16 @@ Return JSON with exactly this structure:
 For section_scores: score 10 = directly answers the query, 1 = completely irrelevant.
 If no sections are available, return an empty section_scores array."""
 
-        client = get_async_client()
-        response = await create_chat_completion_async(
-            client=client,
-            model=model,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt},
-            ],
-            temperature=0,
-        )
+        async with managed_async_client(get_async_client()) as client:
+            response = await create_chat_completion_async(
+                client=client,
+                model=model,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt},
+                ],
+                temperature=0,
+            )
         raw = extract_llm_text(response)
         payload = parse_json_response(raw)
 

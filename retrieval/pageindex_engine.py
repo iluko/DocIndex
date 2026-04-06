@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import logging
+from collections.abc import Callable
 from dataclasses import dataclass, field
 
 from dotenv import load_dotenv
@@ -32,6 +33,7 @@ from utils import (
     get_async_client,
     get_default_model,
     iter_tree_nodes,
+    managed_async_client,
     render_conversation_context,
     strip_text_fields,
 )
@@ -298,13 +300,16 @@ async def run_pageindex_retrieval(
     reasoning_effort: str | None = None,
     max_tool_calls: int = 12,
     model_max_tokens: int = 100000,
+    answer_immediately: bool = True,
+    answer_token_callback: Callable[[str], None] | None = None,
 ) -> tuple[str, list[str], str, PageIndexEngineResult]:
     """Run PageIndex-style agentic retrieval for the pre-selected documents.
 
     Returns
     -------
     answer : str
-        The final LLM-generated answer.
+        The final LLM-generated answer, or an empty string when
+        ``answer_immediately=False``.
     accessed_nodes : list[str]
         Every ``doc_id::node_id`` the agent actually read.
     combined_context : str
@@ -314,7 +319,6 @@ async def run_pageindex_retrieval(
         whether any budget was exhausted during the run.
     """
     model = model or get_default_model()
-    client = get_async_client()
     doc_block = _doc_summary_block(selected_doc_ids, master_tree_store)
     conversation_block = render_conversation_context(conversation_context)
 
@@ -345,98 +349,115 @@ contain enough information, say so clearly.
     final_answer = ""
     tool_budget_exhausted = False
 
-    for iteration in range(max_tool_calls):
-        response = await create_chat_completion_async(
-            client=client,
-            model=model,
-            messages=state.messages,
-            temperature=0,
-            reasoning_effort=reasoning_effort,
-            tools=_TOOLS,
-            tool_choice="auto",
-        )
-
-        tool_calls = _extract_tool_calls(response)
-
-        # No tool calls → the LLM has decided to answer.
-        if not tool_calls:
-            final_answer = extract_llm_text(response)
-            break
-
-        # Append the assistant's turn (may include tool_calls key).
-        assistant_turn = _assistant_message_from_response(response)
-        # Drop None tool_calls key to keep messages list clean.
-        if assistant_turn.get("tool_calls") is None:
-            assistant_turn.pop("tool_calls", None)
-        state.messages.append(assistant_turn)
-
-        # Execute every tool call and add results back to the conversation.
-        for tc in tool_calls:
-            tc_id = getattr(tc, "id", "") or tc.get("id", "")
-            if isinstance(tc, dict):
-                name = tc.get("function", {}).get("name", "")
-                raw_args = tc.get("function", {}).get("arguments", "{}")
-            else:
-                name = getattr(tc.function, "name", "")
-                raw_args = getattr(tc.function, "arguments", "{}")
-
-            result = _dispatch_tool(name, raw_args, storage, state)
-            state.tool_calls_made += 1
-
-            # Track which nodes were actually read.
-            if name == "get_node_content":
-                try:
-                    args = json.loads(raw_args or "{}")
-                    doc_id = args.get("doc_id", "")
-                    node_id = args.get("node_id", "")
-                    if doc_id and node_id:
-                        node_ref = f"{doc_id}::{node_id}"
-                        if node_ref not in state.accessed_nodes:
-                            state.accessed_nodes.append(node_ref)
-                            state.retrieved_texts.append(result)
-                except (json.JSONDecodeError, AttributeError):
-                    pass
-
-            state.messages.append(
-                {
-                    "role": "tool",
-                    "tool_call_id": tc_id,
-                    "content": result,
-                }
+    async with managed_async_client(get_async_client()) as client:
+        for iteration in range(max_tool_calls):
+            response = await create_chat_completion_async(
+                client=client,
+                model=model,
+                messages=state.messages,
+                temperature=0,
+                reasoning_effort=reasoning_effort,
+                tools=_TOOLS,
+                tool_choice="auto",
             )
 
-        logger.debug(
-            "PageIndex agent iteration %d/%d — tool calls: %d total so far.",
-            iteration + 1,
-            max_tool_calls,
-            state.tool_calls_made,
-        )
-    else:
-        # Hit the cap — ask for a final answer with whatever was retrieved.
-        tool_budget_exhausted = True
-        logger.warning(
-            "PageIndex agent hit max_tool_calls=%d for query '%s…'. "
-            "Requesting final answer.",
-            max_tool_calls,
-            user_query[:60],
-        )
-        state.messages.append(
-            {
-                "role": "user",
-                "content": (
-                    "You have reached the tool call limit. "
-                    "Provide your best answer now based on what you have retrieved."
-                ),
-            }
-        )
-        final_response = await create_chat_completion_async(
-            client=client,
-            model=model,
-            messages=state.messages,
-            temperature=0,
-            reasoning_effort=reasoning_effort,
-        )
-        final_answer = extract_llm_text(final_response)
+            tool_calls = _extract_tool_calls(response)
+
+            # No tool calls → the LLM has decided it has enough context to answer.
+            if not tool_calls:
+                if answer_immediately:
+                    final_answer = extract_llm_text(response)
+                    if answer_token_callback is not None:
+                        answer_token_callback(final_answer)
+                break
+
+            # Append the assistant's turn (may include tool_calls key).
+            assistant_turn = _assistant_message_from_response(response)
+            # Drop None tool_calls key to keep messages list clean.
+            if assistant_turn.get("tool_calls") is None:
+                assistant_turn.pop("tool_calls", None)
+            state.messages.append(assistant_turn)
+
+            # Execute every tool call and add results back to the conversation.
+            for tc in tool_calls:
+                tc_id = getattr(tc, "id", "") or tc.get("id", "")
+                if isinstance(tc, dict):
+                    name = tc.get("function", {}).get("name", "")
+                    raw_args = tc.get("function", {}).get("arguments", "{}")
+                else:
+                    name = getattr(tc.function, "name", "")
+                    raw_args = getattr(tc.function, "arguments", "{}")
+
+                result = _dispatch_tool(name, raw_args, storage, state)
+                state.tool_calls_made += 1
+
+                # Track which nodes were actually read (only real content, not error/budget payloads).
+                if name == "get_node_content":
+                    try:
+                        args = json.loads(raw_args or "{}")
+                        doc_id = args.get("doc_id", "")
+                        node_id = args.get("node_id", "")
+                        if doc_id and node_id:
+                            node_ref = f"{doc_id}::{node_id}"
+                            if node_ref not in state.accessed_nodes:
+                                state.accessed_nodes.append(node_ref)
+                                # Only record content that was actually delivered;
+                                # skip budget-exhausted / error JSON payloads.
+                                try:
+                                    parsed = json.loads(result)
+                                    if not isinstance(parsed, dict) or (
+                                        "error" not in parsed and "budget_exhausted" not in parsed
+                                    ):
+                                        state.retrieved_texts.append(result)
+                                except (json.JSONDecodeError, ValueError):
+                                    # Plain text content — record it.
+                                    state.retrieved_texts.append(result)
+                    except (json.JSONDecodeError, AttributeError):
+                        pass
+
+                state.messages.append(
+                    {
+                        "role": "tool",
+                        "tool_call_id": tc_id,
+                        "content": result,
+                    }
+                )
+
+            logger.debug(
+                "PageIndex agent iteration %d/%d — tool calls: %d total so far.",
+                iteration + 1,
+                max_tool_calls,
+                state.tool_calls_made,
+            )
+        else:
+            # Hit the cap — ask for a final answer with whatever was retrieved.
+            tool_budget_exhausted = True
+            logger.warning(
+                "PageIndex agent hit max_tool_calls=%d for query '%s…'. "
+                "Requesting final answer.",
+                max_tool_calls,
+                user_query[:60],
+            )
+            if answer_immediately:
+                state.messages.append(
+                    {
+                        "role": "user",
+                        "content": (
+                            "You have reached the tool call limit. "
+                            "Provide your best answer now based on what you have retrieved."
+                        ),
+                    }
+                )
+                final_response = await create_chat_completion_async(
+                    client=client,
+                    model=model,
+                    messages=state.messages,
+                    temperature=0,
+                    reasoning_effort=reasoning_effort,
+                )
+                final_answer = extract_llm_text(final_response)
+                if answer_token_callback is not None:
+                    answer_token_callback(final_answer)
 
     combined_context = "\n\n".join(state.retrieved_texts)
     engine_result = PageIndexEngineResult(

@@ -578,4 +578,10 @@ Evaluation Metrics
 Comparisons 
 Input of images 
 Is there a way to dynamically allot number of documents required per doc
-Auditability and Traceability-->
+Auditability and Traceability
+Make retreival and answering decoupled. Should be able to retireve onyl retreival is needed
+
+1. Add Images 
+2. Fix Hybrid UI 
+3. Fix Experiments UI 
+4. Create Golden Dataset-->

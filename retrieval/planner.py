@@ -25,6 +25,7 @@ from utils import (
     extract_llm_text,
     get_async_client,
     get_default_model,
+    managed_async_client,
     parse_json_response,
 )
 
@@ -100,17 +101,17 @@ class QueryPlan:
 
 async def _chat_completion(model: str, user_prompt: str) -> str:
     """Run the planner LLM call — no reasoning effort needed, keep it fast."""
-    client = get_async_client()
-    response = await create_chat_completion_async(
-        client=client,
-        model=model,
-        messages=[
-            {"role": "system", "content": _SYSTEM_PROMPT},
-            {"role": "user", "content": user_prompt},
-        ],
-        temperature=0,
-        reasoning_effort=None,
-    )
+    async with managed_async_client(get_async_client()) as client:
+        response = await create_chat_completion_async(
+            client=client,
+            model=model,
+            messages=[
+                {"role": "system", "content": _SYSTEM_PROMPT},
+                {"role": "user", "content": user_prompt},
+            ],
+            temperature=0,
+            reasoning_effort=None,
+        )
     return extract_llm_text(response)
 
 

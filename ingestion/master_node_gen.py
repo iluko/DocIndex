@@ -19,6 +19,7 @@ from utils import (
     iter_tree_nodes,
     get_master_top_sections_range,
     get_master_top_sections_target,
+    managed_async_client,
     parse_json_response,
     strip_text_fields,
 )
@@ -64,17 +65,17 @@ Schema:
 
 async def _chat_completion(model: str, system_prompt: str, user_prompt: str) -> str:
     """Run the master-node LLM call with ingestion-grade reasoning settings."""
-    client = get_async_client()
-    response = await create_chat_completion_async(
-        client=client,
-        model=model,
-        messages=[
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt},
-        ],
-        temperature=0,
-        reasoning_effort=INGESTION_REASONING_EFFORT,
-    )
+    async with managed_async_client(get_async_client()) as client:
+        response = await create_chat_completion_async(
+            client=client,
+            model=model,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            temperature=0,
+            reasoning_effort=INGESTION_REASONING_EFFORT,
+        )
     return extract_llm_text(response)
 
 

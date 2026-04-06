@@ -1,0 +1,10 @@
+-r requirements-dev.txt
+
+# Optional experiments-only local vector RAG stack
+numpy>=1.24.0
+sentence-transformers>=3.0.0
+rank-bm25>=0.2.2
+
+# Optional acceleration for local ANN search. The vector-RAG baseline still
+# works without this via brute-force cosine search over stored embeddings.
+# hnswlib>=0.8.0

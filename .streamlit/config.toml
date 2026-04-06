@@ -1,0 +1,7 @@
+[server]
+# Use filesystem polling instead of the default module-introspecting watcher.
+# The default "auto" watcher inspects every loaded module's __path__, which
+# triggers transformers' lazy-import chain and floods the log with
+# ModuleNotFoundError for torchvision. Poll mode watches files directly
+# and never touches module objects. Hot reload still works.
+fileWatcherType = "poll"

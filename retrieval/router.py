@@ -23,6 +23,7 @@ from utils import (
     extract_llm_text,
     get_async_client,
     get_default_model,
+    managed_async_client,
     parse_json_response,
     render_conversation_context,
 )
@@ -53,17 +54,17 @@ async def _chat_completion(
     reasoning_effort: str | None = None,
 ) -> str:
     """Run the router's LLM call and return plain text content."""
-    client = get_async_client()
-    response = await create_chat_completion_async(
-        client=client,
-        model=model,
-        messages=[
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt},
-        ],
-        temperature=0,
-        reasoning_effort=reasoning_effort,
-    )
+    async with managed_async_client(get_async_client()) as client:
+        response = await create_chat_completion_async(
+            client=client,
+            model=model,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            temperature=0,
+            reasoning_effort=reasoning_effort,
+        )
     return extract_llm_text(response)
 
 

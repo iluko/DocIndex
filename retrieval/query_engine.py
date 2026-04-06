@@ -74,6 +74,7 @@ from utils import (
     is_stream_options_unsupported_error,
     is_temperature_unsupported_error,
     llm_usage_context,
+    managed_async_client,
     model_supports_explicit_temperature,
     normalize_reasoning_effort,
     record_llm_usage,
@@ -204,17 +205,17 @@ async def _answer_query(
     reasoning_effort: str | None = None,
 ) -> str:
     """Run the final answer-generation LLM call."""
-    client = get_async_client()
-    response = await create_chat_completion_async(
-        client=client,
-        model=model,
-        messages=[
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt},
-        ],
-        temperature=0.1,
-        reasoning_effort=reasoning_effort,
-    )
+    async with managed_async_client(get_async_client()) as client:
+        response = await create_chat_completion_async(
+            client=client,
+            model=model,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            temperature=0.1,
+            reasoning_effort=reasoning_effort,
+        )
     return extract_llm_text(response)
 
 
@@ -226,7 +227,6 @@ async def _answer_query_streaming(
     on_token: Callable[[str], None],
 ) -> str:
     """Stream the answer call, forwarding tokens and returning the full answer."""
-    client = get_async_client()
     messages = [
         {"role": "system", "content": system_prompt},
         {"role": "user", "content": user_prompt},
@@ -243,35 +243,36 @@ async def _answer_query_streaming(
     if normalized_effort:
         request_kwargs["reasoning_effort"] = normalized_effort
 
-    while True:
-        try:
-            stream = await client.chat.completions.create(**request_kwargs)
-            break
-        except Exception as exc:
-            stripped = False
-            if "reasoning_effort" in request_kwargs and is_reasoning_effort_unsupported_error(exc):
-                request_kwargs.pop("reasoning_effort")
-                stripped = True
-            if "temperature" in request_kwargs and is_temperature_unsupported_error(exc):
-                request_kwargs.pop("temperature")
-                stripped = True
-            if "stream_options" in request_kwargs and is_stream_options_unsupported_error(exc):
-                request_kwargs.pop("stream_options")
-                stripped = True
-            if not stripped:
-                raise
+    async with managed_async_client(get_async_client()) as client:
+        while True:
+            try:
+                stream = await client.chat.completions.create(**request_kwargs)
+                break
+            except Exception as exc:
+                stripped = False
+                if "reasoning_effort" in request_kwargs and is_reasoning_effort_unsupported_error(exc):
+                    request_kwargs.pop("reasoning_effort")
+                    stripped = True
+                if "temperature" in request_kwargs and is_temperature_unsupported_error(exc):
+                    request_kwargs.pop("temperature")
+                    stripped = True
+                if "stream_options" in request_kwargs and is_stream_options_unsupported_error(exc):
+                    request_kwargs.pop("stream_options")
+                    stripped = True
+                if not stripped:
+                    raise
 
-    collected: list[str] = []
-    usage_recorded = False
-    async for chunk in stream:
-        usage = extract_usage(chunk)
-        if usage is not None:
-            record_llm_usage(messages=messages, usage=usage)
-            usage_recorded = True
-        if chunk.choices and chunk.choices[0].delta.content:
-            token: str = chunk.choices[0].delta.content
-            on_token(token)
-            collected.append(token)
+        collected: list[str] = []
+        usage_recorded = False
+        async for chunk in stream:
+            usage = extract_usage(chunk)
+            if usage is not None:
+                record_llm_usage(messages=messages, usage=usage)
+                usage_recorded = True
+            if chunk.choices and chunk.choices[0].delta.content:
+                token: str = chunk.choices[0].delta.content
+                on_token(token)
+                collected.append(token)
     answer = "".join(collected)
     if not usage_recorded:
         record_llm_usage(messages=messages, completion_text=answer)
@@ -510,6 +511,7 @@ async def _run_pageindex_mode(
     model: str,
     verbose: bool,
     reasoning_effort: str | None,
+    answer_token_callback: Callable[[str], None] | None = None,
 ) -> tuple[str, list[str], dict[str, list[str]], str, PageIndexEngineResult]:
     """Execute the PageIndex agentic loop for pre-selected documents."""
     answer, accessed_nodes, combined_context, engine_result = await run_pageindex_retrieval(
@@ -520,6 +522,7 @@ async def _run_pageindex_mode(
         model=model,
         conversation_context=conversation_context,
         reasoning_effort=reasoning_effort,
+        answer_token_callback=answer_token_callback,
     )
 
     if verbose:
@@ -884,6 +887,9 @@ async def query(
                     model=model,
                     verbose=verbose,
                     reasoning_effort=reasoning_effort,
+                    answer_token_callback=(
+                        _wrapped_answer_token if answer_token_callback is not None else None
+                    ),
                 )
             )
             _pi_result = QueryResult(

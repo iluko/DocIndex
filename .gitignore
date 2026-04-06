@@ -14,5 +14,12 @@ data/derived_markdown/
 data/model_registry.json
 data/traces
 
+# Experiments harness source should stay tracked; generated artifacts should not.
+experiments/artifacts/*
+!experiments/
+!experiments/**/*.py
+!experiments/**/*.md
+!experiments/**/.gitkeep
+
 # Keep placeholder files so empty directories stay tracked
 !**/.gitkeep

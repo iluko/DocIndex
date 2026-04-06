@@ -220,19 +220,20 @@ async def _chat_completion(model: str, system_prompt: str, user_prompt: str) -> 
         create_chat_completion_async,
         extract_llm_text,
         get_async_client,
+        managed_async_client,
     )
 
-    client = get_async_client()
-    response = await create_chat_completion_async(
-        client=client,
-        model=model,
-        messages=[
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt},
-        ],
-        temperature=0,
-        reasoning_effort=INGESTION_REASONING_EFFORT,
-    )
+    async with managed_async_client(get_async_client()) as client:
+        response = await create_chat_completion_async(
+            client=client,
+            model=model,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            temperature=0,
+            reasoning_effort=INGESTION_REASONING_EFFORT,
+        )
     return extract_llm_text(response)
 
 

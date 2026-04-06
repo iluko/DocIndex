@@ -26,6 +26,7 @@ from utils import (
     find_tree_node,
     get_async_client,
     get_default_model,
+    managed_async_client,
     parse_json_response,
 )
 
@@ -125,18 +126,18 @@ async def verify_navigation(
 
     system_prompt, user_prompt = _build_verification_prompt(query, candidates)
 
-    client = get_async_client()
     try:
-        response = await create_chat_completion_async(
-            client=client,
-            model=model,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt},
-            ],
-            temperature=0,
-            reasoning_effort=reasoning_effort,
-        )
+        async with managed_async_client(get_async_client()) as client:
+            response = await create_chat_completion_async(
+                client=client,
+                model=model,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt},
+                ],
+                temperature=0,
+                reasoning_effort=reasoning_effort,
+            )
         raw = extract_llm_text(response)
         verdict_map: dict = parse_json_response(raw)
     except Exception as exc:  # noqa: BLE001
