@@ -79,6 +79,77 @@ def sanitize_index_key_part(value: str) -> str:
     return result or "default"
 
 
+def _load_index_metadata(index_dir: Path) -> dict[str, Any]:
+    """Load per-index metadata if it exists, tolerating malformed files."""
+    metadata_path = index_dir / "index_meta.json"
+    if not metadata_path.exists():
+        return {}
+    try:
+        payload = json.loads(metadata_path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _project_artifact_score(index_dir: Path) -> int:
+    """Score how much real index content a project directory contains.
+
+    Higher scores indicate a more meaningful directory and help us prefer
+    populated legacy directories over empty placeholder aliases.
+    """
+    score = 0
+    if (index_dir / "master_tree.json").exists():
+        score += 100
+    if (index_dir / "doc_sources.json").exists():
+        score += 50
+    for relative in ("doc_trees", "derived_markdown"):
+        subdir = index_dir / relative
+        if not subdir.exists():
+            continue
+        if any(path.is_file() and path.name != ".gitkeep" for path in subdir.rglob("*")):
+            score += 25
+    return score
+
+
+def find_project_aliases(base_data_dir: str | Path, project: str | None) -> list[str]:
+    """Return every on-disk directory that normalizes to the same project key."""
+    canonical = sanitize_index_key_part(project) if project else DEFAULT_PROJECT
+    indexes_dir = Path(base_data_dir) / "indexes"
+    if not indexes_dir.exists():
+        return [canonical]
+
+    aliases = sorted(
+        path.name
+        for path in indexes_dir.iterdir()
+        if path.is_dir() and not path.name.startswith(".") and sanitize_index_key_part(path.name) == canonical
+    )
+    return aliases or [canonical]
+
+
+def resolve_project_key(base_data_dir: str | Path, project: str | None) -> str:
+    """Resolve a requested project name to the preferred on-disk directory key.
+
+    This consolidates legacy alias directories such as repeated-underscore
+    variants into one logical project name while still preferring whichever
+    directory actually contains the real artifacts.
+    """
+    canonical = sanitize_index_key_part(project) if project else DEFAULT_PROJECT
+    aliases = find_project_aliases(base_data_dir, canonical)
+    if aliases == [canonical]:
+        return canonical
+
+    def _sort_key(name: str) -> tuple[int, int, int, str]:
+        index_dir = Path(base_data_dir) / "indexes" / name
+        metadata = _load_index_metadata(index_dir)
+        metadata_project = str(metadata.get("project", "")).strip()
+        explicit_project = bool(metadata_project) and sanitize_index_key_part(metadata_project) == canonical
+        exact_name = name == canonical
+        score = _project_artifact_score(index_dir)
+        return (score, int(explicit_project), int(exact_name), name)
+
+    return max(aliases, key=_sort_key)
+
+
 def resolve_index_context(
     base_data_dir: str | Path,
     model: str | None = None,
@@ -93,7 +164,7 @@ def resolve_index_context(
     base_dir = Path(base_data_dir)
     provider = detect_llm_provider()
     resolved_model = model or get_default_model()
-    project_key = sanitize_index_key_part(project) if project else DEFAULT_PROJECT
+    project_key = resolve_project_key(base_dir, project)
     indexes_dir = base_dir / "indexes"
     index_dir = indexes_dir / project_key
 
@@ -113,7 +184,8 @@ def resolve_index_context(
 def list_projects(base_data_dir: str | Path) -> list[str]:
     """Return all project names found under ``data/indexes/``.
 
-    Projects are the directory names immediately under the indexes folder.
+    Projects are grouped by their normalized project key so legacy alias
+    directories do not appear as duplicate logical projects in the UI.
     Returns ``[DEFAULT_PROJECT]`` when no projects exist yet so callers
     always have at least one option.
     """
@@ -121,10 +193,12 @@ def list_projects(base_data_dir: str | Path) -> list[str]:
     if not indexes_dir.exists():
         return [DEFAULT_PROJECT]
     names = sorted(
-        p.name for p in indexes_dir.iterdir()
+        sanitize_index_key_part(p.name)
+        for p in indexes_dir.iterdir()
         if p.is_dir() and not p.name.startswith(".")
     )
-    return names if names else [DEFAULT_PROJECT]
+    deduped = sorted(set(names))
+    return deduped if deduped else [DEFAULT_PROJECT]
 
 
 def _read_json(path: Path) -> dict:
@@ -186,7 +260,9 @@ def delete_project(base_data_dir: str | Path, project: str) -> None:
     The function is intentionally not called through ``build_runtime_components``
     so that it never creates directories before deleting them.
     """
-    context = resolve_index_context(base_data_dir, project=project)
+    base_dir = Path(base_data_dir)
+    aliases = find_project_aliases(base_dir, project)
+    context = resolve_index_context(base_dir, project=project)
     backend = os.environ.get("STORAGE_BACKEND", "local").lower()
 
     if backend == "mongodb":
@@ -195,5 +271,8 @@ def delete_project(base_data_dir: str | Path, project: str) -> None:
         MongoDocumentStore(project=context.project).delete_all()
         MongoMasterTreeStore(project=context.project).delete_all()
     else:
-        if context.index_dir.exists():
-            shutil.rmtree(context.index_dir)
+        indexes_dir = base_dir / "indexes"
+        for alias in aliases:
+            alias_dir = indexes_dir / alias
+            if alias_dir.exists():
+                shutil.rmtree(alias_dir)

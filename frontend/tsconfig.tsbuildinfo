@@ -1,0 +1,1 @@
+{"root":["./src/app.tsx","./src/config.ts","./src/main.tsx","./src/types.ts","./src/api/client.ts","./src/components/appshell.tsx","./src/components/chatthread.tsx","./src/components/helphint.tsx","./src/components/inspectorpanel.tsx","./src/components/selectmenu.tsx","./src/pages/askpage.tsx","./src/pages/ingestpage.tsx","./src/pages/inspectpage.tsx"],"version":"5.9.3"}
