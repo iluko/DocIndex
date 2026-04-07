@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any, Callable
 from uuid import uuid4
 
 from experiments.builds.registry import ArtifactBuildRunner
@@ -18,8 +19,24 @@ from experiments.runs.registry import ExperimentRunRunner
 from utils import atomic_write_text
 
 
+ProgressCallback = Callable[[dict[str, Any]], None]
+
+
 def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _emit_progress(
+    progress_callback: ProgressCallback | None,
+    event: str,
+    **payload: Any,
+) -> None:
+    if progress_callback is None:
+        return
+    try:
+        progress_callback({"event": event, **payload})
+    except Exception:
+        return
 
 
 class EvaluationRunner:
@@ -63,6 +80,7 @@ class EvaluationRunner:
         judge_enabled: bool = False,
         judge_model: str | None = None,
         judge_reasoning_effort: str | None = None,
+        progress_callback: ProgressCallback | None = None,
     ) -> EvaluationRunManifest:
         if judge_enabled and not judge_model:
             raise ValueError("Judge scoring was enabled, but no judge model was provided.")
@@ -73,9 +91,19 @@ class EvaluationRunner:
         if suite_id:
             suite = self.suites.load_suite(suite_id)
         else:
-            suite = build_suite_from_runs(selected_runs)
-            if persist_suite:
-                self.suites.save_suite(suite)
+            attached_suite_ids = {run.suite_id for run in selected_runs if run.suite_id}
+            if len(attached_suite_ids) == 1:
+                attached_suite_id = next(iter(attached_suite_ids))
+                try:
+                    suite = self.suites.load_suite(attached_suite_id)
+                except FileNotFoundError:
+                    suite = build_suite_from_runs(selected_runs)
+                    if persist_suite:
+                        self.suites.save_suite(suite)
+            else:
+                suite = build_suite_from_runs(selected_runs)
+                if persist_suite:
+                    self.suites.save_suite(suite)
 
         eval_run_id = str(uuid4())
         manifest = EvaluationRunManifest(
@@ -92,6 +120,17 @@ class EvaluationRunner:
             source_run_ids=[run.run_id for run in selected_runs],
         )
         self._persist_manifest(manifest)
+        total_entries = sum(len(run.entries) for run in selected_runs)
+        _emit_progress(
+            progress_callback,
+            "evaluation_started",
+            eval_run_id=manifest.eval_run_id,
+            title=manifest.title,
+            total_runs=len(selected_runs),
+            total_entries=total_entries,
+            judge_enabled=judge_enabled,
+            suite_id=manifest.suite.suite_id,
+        )
 
         build_ids = {entry.build_id for run in selected_runs for entry in run.entries}
         build_lookup = {}
@@ -105,13 +144,17 @@ class EvaluationRunner:
             runs=selected_runs,
             suite=suite,
             build_lookup=build_lookup,
+            progress_callback=progress_callback,
         )
+        manifest.entries = entries
+        self._persist_manifest(manifest)
         if judge_enabled and judge_model:
             entries, judge_error = score_entries_with_judge(
                 entries=entries,
                 suite_lookup=suite.case_lookup(),
                 judge_model=judge_model,
                 judge_reasoning_effort=judge_reasoning_effort,
+                progress_callback=progress_callback,
             )
             manifest.judge_error = judge_error
         aggregate_payload = aggregate_entries(entries, source_runs_scanned=len(selected_runs))
@@ -125,6 +168,16 @@ class EvaluationRunner:
             eval_runs_dir=self.paths.eval_runs_dir,
         )
         self._persist_manifest(manifest)
+        _emit_progress(
+            progress_callback,
+            "evaluation_completed",
+            eval_run_id=manifest.eval_run_id,
+            title=manifest.title,
+            status=manifest.status,
+            total_runs=len(selected_runs),
+            total_entries=len(entries),
+            judge_enabled=judge_enabled,
+        )
         return manifest
 
     def _selected_runs(self, source_run_ids: list[str] | None = None):

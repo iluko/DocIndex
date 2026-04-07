@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from experiments.evals.models import EvaluationCase, EvaluationEntryResult, JudgeScorecard
 from utils import (
@@ -16,6 +16,22 @@ from utils import (
     normalize_reasoning_effort,
     parse_json_response,
 )
+
+
+ProgressCallback = Callable[[dict[str, Any]], None]
+
+
+def _emit_progress(
+    progress_callback: ProgressCallback | None,
+    event: str,
+    **payload: Any,
+) -> None:
+    if progress_callback is None:
+        return
+    try:
+        progress_callback({"event": event, **payload})
+    except Exception:
+        return
 
 
 def _safe_trace_payload(path: str | None) -> dict[str, Any]:
@@ -280,25 +296,64 @@ def score_entries_with_judge(
     suite_lookup: dict[str, EvaluationCase],
     judge_model: str,
     judge_reasoning_effort: str | None = None,
+    progress_callback: ProgressCallback | None = None,
 ) -> tuple[list[EvaluationEntryResult], str | None]:
     """Layer judge-based scoring onto already evaluated entries."""
+    eligible_entries = [entry for entry in entries if entry.status == "completed"]
+    _emit_progress(
+        progress_callback,
+        "judge_started",
+        judge_model=judge_model,
+        total_entries=len(eligible_entries),
+    )
     try:
         client = get_sync_client()
     except Exception as exc:  # pragma: no cover - depends on local env and provider config
         error = f"Judge scoring unavailable: {exc}"
         for entry in entries:
             entry.judge_error = error
+        _emit_progress(
+            progress_callback,
+            "judge_completed",
+            judge_model=judge_model,
+            total_entries=len(eligible_entries),
+            judged_entries=0,
+            error=error,
+        )
         return entries, error
 
     judged_count = 0
     first_error: str | None = None
+    processed_entries = 0
     for entry in entries:
         if entry.status != "completed":
             continue
+        _emit_progress(
+            progress_callback,
+            "judge_entry_started",
+            processed_entries=processed_entries,
+            total_entries=len(eligible_entries),
+            source_run_id=entry.source_run_id,
+            case_id=entry.case_id,
+            label=entry.label,
+        )
         trace_payload = _safe_trace_payload(entry.trace_path)
         if not trace_payload:
             entry.judge_error = "No trace payload was available for judge scoring."
             first_error = first_error or entry.judge_error
+            processed_entries += 1
+            _emit_progress(
+                progress_callback,
+                "judge_entry_completed",
+                processed_entries=processed_entries,
+                total_entries=len(eligible_entries),
+                source_run_id=entry.source_run_id,
+                case_id=entry.case_id,
+                label=entry.label,
+                status=entry.status,
+                judge_score=None,
+                judge_error=entry.judge_error,
+            )
             continue
         try:
             entry.judge_scorecard = _judge_one_entry(
@@ -314,7 +369,40 @@ def score_entries_with_judge(
         except Exception as exc:  # pragma: no cover - depends on provider behavior
             entry.judge_error = str(exc)
             first_error = first_error or str(exc)
+        processed_entries += 1
+        _emit_progress(
+            progress_callback,
+            "judge_entry_completed",
+            processed_entries=processed_entries,
+            total_entries=len(eligible_entries),
+            source_run_id=entry.source_run_id,
+            case_id=entry.case_id,
+            label=entry.label,
+            status=entry.status,
+            judge_score=(
+                entry.judge_scorecard.overall_quality_score
+                if entry.judge_scorecard is not None
+                else None
+            ),
+            judge_error=entry.judge_error,
+        )
 
     if judged_count == 0 and first_error:
+        _emit_progress(
+            progress_callback,
+            "judge_completed",
+            judge_model=judge_model,
+            total_entries=len(eligible_entries),
+            judged_entries=judged_count,
+            error=f"Judge scoring did not complete for any entry: {first_error}",
+        )
         return entries, f"Judge scoring did not complete for any entry: {first_error}"
+    _emit_progress(
+        progress_callback,
+        "judge_completed",
+        judge_model=judge_model,
+        total_entries=len(eligible_entries),
+        judged_entries=judged_count,
+        error=first_error,
+    )
     return entries, first_error

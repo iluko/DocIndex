@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 import hashlib
 import json
 from pathlib import Path
-from typing import Iterable
+from typing import TYPE_CHECKING, Any, Callable, Iterable
 from uuid import uuid4
 
 from experiments.answering import answer_from_context
@@ -31,9 +31,29 @@ from utils import (
     llm_usage_context,
 )
 
+if TYPE_CHECKING:
+    from experiments.evals.models import EvaluationCase, EvaluationSuite
+
+
+ProgressCallback = Callable[[dict[str, Any]], None]
+
 
 def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _emit_progress(
+    progress_callback: ProgressCallback | None,
+    event: str,
+    **payload: Any,
+) -> None:
+    """Emit a best-effort progress event without breaking run execution."""
+    if progress_callback is None:
+        return
+    try:
+        progress_callback({"event": event, **payload})
+    except Exception:
+        return
 
 
 def _spec_hash(
@@ -44,6 +64,7 @@ def _spec_hash(
     conversation_context: str | None,
     question_type: str,
     suite_id: str | None,
+    case_id: str | None,
 ) -> str:
     payload = {
         "query": query,
@@ -51,6 +72,7 @@ def _spec_hash(
         "conversation_context": conversation_context or "",
         "question_type": question_type,
         "suite_id": suite_id or "",
+        "case_id": case_id or "",
         "entries": [entry.model_dump(mode="json") for entry in entries],
     }
     rendered = json.dumps(payload, sort_keys=True, ensure_ascii=False)
@@ -108,8 +130,10 @@ class ExperimentRunRunner:
         title: str | None = None,
         question_type: str = "unspecified",
         suite_id: str | None = None,
+        case_id: str | None = None,
         max_concurrency: int | None = None,
         resume_existing: bool = False,
+        progress_callback: ProgressCallback | None = None,
     ) -> ComparisonRunManifest:
         return asyncio.run(
             self.run_comparison_async(
@@ -120,8 +144,10 @@ class ExperimentRunRunner:
                 title=title,
                 question_type=question_type,
                 suite_id=suite_id,
+                case_id=case_id,
                 max_concurrency=max_concurrency,
                 resume_existing=resume_existing,
+                progress_callback=progress_callback,
             )
         )
 
@@ -135,9 +161,11 @@ class ExperimentRunRunner:
         title: str | None = None,
         question_type: str = "unspecified",
         suite_id: str | None = None,
+        case_id: str | None = None,
         max_concurrency: int | None = None,
         resume_existing: bool = False,
         source_run_id: str | None = None,
+        progress_callback: ProgressCallback | None = None,
     ) -> ComparisonRunManifest:
         resolved_model = model or get_default_model()
         spec_hash = _spec_hash(
@@ -147,11 +175,16 @@ class ExperimentRunRunner:
             conversation_context=conversation_context,
             question_type=question_type,
             suite_id=suite_id,
+            case_id=case_id,
         )
         if resume_existing:
             existing = self.find_run_by_spec_hash(spec_hash)
             if existing and existing.status in {"pending", "running", "failed"}:
-                return await self.resume_run(existing.run_id, max_concurrency=max_concurrency)
+                return await self.resume_run(
+                    existing.run_id,
+                    max_concurrency=max_concurrency,
+                    progress_callback=progress_callback,
+                )
 
         run_id = str(uuid4())
         manifest = ComparisonRunManifest(
@@ -161,6 +194,7 @@ class ExperimentRunRunner:
             conversation_context=conversation_context,
             question_type=question_type,
             suite_id=suite_id,
+            case_id=case_id,
             created_at=_utc_now(),
             model=resolved_model,
             max_concurrency=max_concurrency,
@@ -182,9 +216,21 @@ class ExperimentRunRunner:
             ],
         )
         await self._persist_manifest(manifest)
+        _emit_progress(
+            progress_callback,
+            "comparison_started",
+            run_id=manifest.run_id,
+            title=manifest.title,
+            query=manifest.query,
+            suite_id=manifest.suite_id,
+            case_id=manifest.case_id,
+            question_type=manifest.question_type,
+            total_entries=len(manifest.requested_entries),
+        )
         manifest = await self._execute_manifest_entries(
             manifest,
             max_concurrency=max_concurrency,
+            progress_callback=progress_callback,
         )
         manifest.status = "completed" if all(r.status == "completed" for r in manifest.entries) else "failed"
         manifest.completed_at = _utc_now()
@@ -192,6 +238,17 @@ class ExperimentRunRunner:
         manifest.report_paths = write_run_reports(run=manifest, reports_dir=self.paths.reports_dir)
         write_aggregate_reports(runs=self.list_runs_with(manifest), reports_dir=self.paths.reports_dir)
         await self._persist_manifest(manifest)
+        _emit_progress(
+            progress_callback,
+            "comparison_completed",
+            run_id=manifest.run_id,
+            title=manifest.title,
+            suite_id=manifest.suite_id,
+            case_id=manifest.case_id,
+            status=manifest.status,
+            completed_entries=sum(1 for entry in manifest.entries if entry.status == "completed"),
+            total_entries=len(manifest.entries),
+        )
         return manifest
 
     async def resume_run(
@@ -199,14 +256,27 @@ class ExperimentRunRunner:
         run_id: str,
         *,
         max_concurrency: int | None = None,
+        progress_callback: ProgressCallback | None = None,
     ) -> ComparisonRunManifest:
         """Resume a previously started run by executing unfinished entries only."""
         manifest = self.load_run(run_id)
         manifest.status = "running"
         await self._persist_manifest(manifest)
+        _emit_progress(
+            progress_callback,
+            "comparison_started",
+            run_id=manifest.run_id,
+            title=manifest.title,
+            query=manifest.query,
+            suite_id=manifest.suite_id,
+            case_id=manifest.case_id,
+            question_type=manifest.question_type,
+            total_entries=len(manifest.requested_entries),
+        )
         manifest = await self._execute_manifest_entries(
             manifest,
             max_concurrency=max_concurrency,
+            progress_callback=progress_callback,
         )
         manifest.status = "completed" if all(r.status == "completed" for r in manifest.entries) else "failed"
         manifest.completed_at = _utc_now()
@@ -214,6 +284,17 @@ class ExperimentRunRunner:
         manifest.report_paths = write_run_reports(run=manifest, reports_dir=self.paths.reports_dir)
         write_aggregate_reports(runs=self.list_runs_with(manifest), reports_dir=self.paths.reports_dir)
         await self._persist_manifest(manifest)
+        _emit_progress(
+            progress_callback,
+            "comparison_completed",
+            run_id=manifest.run_id,
+            title=manifest.title,
+            suite_id=manifest.suite_id,
+            case_id=manifest.case_id,
+            status=manifest.status,
+            completed_entries=sum(1 for entry in manifest.entries if entry.status == "completed"),
+            total_entries=len(manifest.entries),
+        )
         return manifest
 
     def rerun_entries(
@@ -292,6 +373,7 @@ class ExperimentRunRunner:
             title=f"{original.title} · rerun",
             question_type=original.question_type,
             suite_id=original.suite_id,
+            case_id=original.case_id,
             max_concurrency=max_concurrency,
             source_run_id=original.run_id,
         )
@@ -322,12 +404,32 @@ class ExperimentRunRunner:
         manifest: ComparisonRunManifest,
         *,
         max_concurrency: int | None = None,
+        progress_callback: ProgressCallback | None = None,
     ) -> ComparisonRunManifest:
         concurrency = max(1, min(max_concurrency or len(manifest.requested_entries) or 1, len(manifest.requested_entries) or 1))
         semaphore = asyncio.Semaphore(concurrency)
+        state_lock = asyncio.Lock()
 
         async def _wrapped(index: int, entry: RunEntrySpec) -> tuple[int, RunEntrySummary]:
             async with semaphore:
+                async with state_lock:
+                    manifest.entries[index].status = "running"
+                    manifest.entries[index].error = None
+                    await self._persist_manifest(manifest)
+                _emit_progress(
+                    progress_callback,
+                    "comparison_entry_started",
+                    run_id=manifest.run_id,
+                    title=manifest.title,
+                    suite_id=manifest.suite_id,
+                    case_id=manifest.case_id,
+                    entry_index=index + 1,
+                    total_entries=len(manifest.requested_entries),
+                    label=entry.label,
+                    build_id=entry.build_id,
+                    retrieval_profile_id=entry.retrieval_profile.profile_id,
+                    answer_profile_id=entry.answer_profile.profile_id,
+                )
                 result = await self._execute_entry(
                     run_id=manifest.run_id,
                     index=index,
@@ -336,12 +438,32 @@ class ExperimentRunRunner:
                     model=manifest.model,
                     conversation_context=manifest.conversation_context,
                 )
+                async with state_lock:
+                    manifest.entries[index] = result
+                    manifest.summary = summarize_comparison(manifest.entries)
+                    await self._persist_manifest(manifest)
+                _emit_progress(
+                    progress_callback,
+                    "comparison_entry_completed",
+                    run_id=manifest.run_id,
+                    title=manifest.title,
+                    suite_id=manifest.suite_id,
+                    case_id=manifest.case_id,
+                    entry_index=index + 1,
+                    total_entries=len(manifest.requested_entries),
+                    label=result.label,
+                    build_id=result.build_id,
+                    retrieval_profile_id=result.retrieval_profile_id,
+                    answer_profile_id=result.answer_profile_id,
+                    status=result.status,
+                    error=result.error,
+                )
                 return index, result
 
         pending_indices = [
             index
             for index, current in enumerate(manifest.entries)
-            if current.status == "pending" and current.error == "Pending execution."
+            if current.status in {"pending", "running"}
         ]
         if not pending_indices:
             return manifest
@@ -351,10 +473,7 @@ class ExperimentRunRunner:
             for index in pending_indices
         ]
         for completed in asyncio.as_completed(tasks):
-            index, result = await completed
-            manifest.entries[index] = result
-            manifest.summary = summarize_comparison(manifest.entries)
-            await self._persist_manifest(manifest)
+            await completed
         return manifest
 
     def list_runs_with(self, manifest: ComparisonRunManifest) -> list[ComparisonRunManifest]:
@@ -363,6 +482,150 @@ class ExperimentRunRunner:
         runs.append(manifest)
         runs.sort(key=lambda run: run.created_at)
         return runs
+
+    def latest_runs_for_suite(self, suite_id: str) -> dict[str, ComparisonRunManifest]:
+        """Return the newest run for each suite-linked case."""
+        latest_by_case: dict[str, ComparisonRunManifest] = {}
+        for run in self.list_runs():
+            if run.suite_id != suite_id or not run.case_id:
+                continue
+            current = latest_by_case.get(run.case_id)
+            if current is None or run.created_at > current.created_at:
+                latest_by_case[run.case_id] = run
+        return latest_by_case
+
+    def completed_case_ids_for_suite(self, suite_id: str) -> set[str]:
+        """Return suite case IDs that already have a completed run."""
+        completed: set[str] = set()
+        for run in self.list_runs():
+            if run.suite_id == suite_id and run.case_id and run.status == "completed":
+                completed.add(run.case_id)
+        return completed
+
+    def run_suite_batch(
+        self,
+        *,
+        suite: "EvaluationSuite",
+        entries: Iterable[RunEntrySpec],
+        model: str | None = None,
+        conversation_context: str | None = None,
+        title_prefix: str | None = None,
+        batch_size: int = 5,
+        max_concurrency: int | None = None,
+        resume_existing: bool = False,
+        skip_completed_cases: bool = True,
+        progress_callback: ProgressCallback | None = None,
+    ) -> list[ComparisonRunManifest]:
+        return asyncio.run(
+            self.run_suite_batch_async(
+                suite=suite,
+                entries=list(entries),
+                model=model,
+                conversation_context=conversation_context,
+                title_prefix=title_prefix,
+                batch_size=batch_size,
+                max_concurrency=max_concurrency,
+                resume_existing=resume_existing,
+                skip_completed_cases=skip_completed_cases,
+                progress_callback=progress_callback,
+            )
+        )
+
+    async def run_suite_batch_async(
+        self,
+        *,
+        suite: "EvaluationSuite",
+        entries: list[RunEntrySpec],
+        model: str | None = None,
+        conversation_context: str | None = None,
+        title_prefix: str | None = None,
+        batch_size: int = 5,
+        max_concurrency: int | None = None,
+        resume_existing: bool = False,
+        skip_completed_cases: bool = True,
+        progress_callback: ProgressCallback | None = None,
+    ) -> list[ComparisonRunManifest]:
+        """Execute the next N suite cases as individual comparison runs."""
+        selected_cases = self._select_suite_cases(
+            suite=suite,
+            batch_size=batch_size,
+            skip_completed_cases=skip_completed_cases,
+        )
+        manifests: list[ComparisonRunManifest] = []
+        _emit_progress(
+            progress_callback,
+            "suite_batch_started",
+            suite_id=suite.suite_id,
+            suite_name=suite.name,
+            total_cases=len(selected_cases),
+        )
+        for case_index, case in enumerate(selected_cases, start=1):
+            _emit_progress(
+                progress_callback,
+                "suite_case_started",
+                suite_id=suite.suite_id,
+                suite_name=suite.name,
+                case_id=case.case_id,
+                case_index=case_index,
+                total_cases=len(selected_cases),
+                question=case.question,
+                question_type=case.question_type,
+            )
+            manifest = await self.run_comparison_async(
+                query=case.question,
+                entries=entries,
+                model=model,
+                conversation_context=conversation_context,
+                title=(title_prefix or suite.name) + f" · {case.case_id}",
+                question_type=case.question_type,
+                suite_id=suite.suite_id,
+                case_id=case.case_id,
+                max_concurrency=max_concurrency,
+                resume_existing=resume_existing,
+                progress_callback=progress_callback,
+            )
+            manifests.append(manifest)
+            _emit_progress(
+                progress_callback,
+                "suite_case_completed",
+                suite_id=suite.suite_id,
+                suite_name=suite.name,
+                case_id=case.case_id,
+                case_index=case_index,
+                total_cases=len(selected_cases),
+                run_id=manifest.run_id,
+                title=manifest.title,
+                status=manifest.status,
+            )
+        _emit_progress(
+            progress_callback,
+            "suite_batch_completed",
+            suite_id=suite.suite_id,
+            suite_name=suite.name,
+            completed_cases=len(manifests),
+            total_cases=len(selected_cases),
+        )
+        return manifests
+
+    def _select_suite_cases(
+        self,
+        *,
+        suite: "EvaluationSuite",
+        batch_size: int,
+        skip_completed_cases: bool,
+    ) -> list["EvaluationCase"]:
+        capped_batch_size = max(1, batch_size)
+        completed_case_ids = (
+            self.completed_case_ids_for_suite(suite.suite_id)
+            if skip_completed_cases
+            else set()
+        )
+        remaining_cases = [
+            case
+            for case in suite.cases
+            if case.case_id not in completed_case_ids
+        ]
+        return remaining_cases[:capped_batch_size]
 
     async def _execute_entry(
         self,

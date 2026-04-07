@@ -18,9 +18,11 @@ class DocumentStore(AbstractDocumentStore):
         self.data_dir = Path(data_dir)
         self.trees_dir = self.data_dir / "doc_trees"
         self.derived_markdown_dir = self.data_dir / "derived_markdown"
+        self.images_dir = self.data_dir / "images"
         self.sources_path = self.data_dir / "doc_sources.json"
         self.trees_dir.mkdir(parents=True, exist_ok=True)
         self.derived_markdown_dir.mkdir(parents=True, exist_ok=True)
+        self.images_dir.mkdir(parents=True, exist_ok=True)
 
     def _tree_path(self, doc_id: str) -> Path:
         """Compute the JSON path for one document's saved PageIndex tree."""
@@ -137,6 +139,31 @@ class DocumentStore(AbstractDocumentStore):
         del sources[doc_id]
         self._save_sources(sources)
         return True
+
+    def save_image(self, doc_id: str, img_id: str, data: bytes, ext: str = "png") -> Path:
+        """Save one extracted image and return its path."""
+        doc_images_dir = self.images_dir / doc_id
+        doc_images_dir.mkdir(parents=True, exist_ok=True)
+        path = doc_images_dir / f"{img_id}.{ext}"
+        path.write_bytes(data)
+        return path
+
+    def load_image(self, doc_id: str, img_id: str) -> bytes:
+        """Load a previously stored image by doc_id and img_id."""
+        for ext in ("png", "jpg", "jpeg", "webp"):
+            path = self.images_dir / doc_id / f"{img_id}.{ext}"
+            if path.exists():
+                return path.read_bytes()
+        raise FileNotFoundError(
+            f"No stored image found for doc_id='{doc_id}', img_id='{img_id}'."
+        )
+
+    def list_images(self, doc_id: str) -> list[str]:
+        """Return img_id stems for all stored images under a doc."""
+        doc_images_dir = self.images_dir / doc_id
+        if not doc_images_dir.exists():
+            return []
+        return [p.stem for p in sorted(doc_images_dir.iterdir()) if p.is_file()]
 
     def delete_derived_markdown(self, doc_id: str) -> bool:
         """Delete the derived Markdown file for a DOCX-sourced document, if any.

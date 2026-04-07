@@ -134,101 +134,270 @@ def render_styles() -> None:
     st.markdown(
         """
         <style>
-            .stApp {
-                background:
-                    radial-gradient(circle at top left, rgba(16, 185, 129, 0.10), transparent 28%),
-                    radial-gradient(circle at top right, rgba(14, 165, 233, 0.14), transparent 26%),
-                    linear-gradient(180deg, #f4f1e8 0%, #fdfcf7 48%, #ffffff 100%);
-                color: #14213d;
-            }
+            /* ════════════════════════════════════════════════════════════════
+               Palette
+               Main bg       #fafafa   (zinc-50)
+               Surface       #ffffff
+               Border        #e4e4e7   (zinc-200)  — hairline, not a drawing
+               Text primary  #18181b   (zinc-900)
+               Text muted    #71717a   (zinc-500)
+               Sidebar bg    #18181b   (zinc-900)
+               Sidebar surf  #27272a   (zinc-800)
+               Sidebar bord  #3f3f46   (zinc-700)
+               Sidebar text  #d4d4d8   (zinc-300)
+            ════════════════════════════════════════════════════════════════ */
+
+            /* ── App base ────────────────────────────────────────────────── */
+            .stApp { background: #fafafa !important; color: #18181b; }
+
+            /* ── Hero ────────────────────────────────────────────────────── */
             .hero {
-                padding: 1.4rem 1.6rem;
-                border: 1px solid rgba(20, 33, 61, 0.08);
-                border-radius: 22px;
-                background: rgba(255, 255, 255, 0.82);
-                box-shadow: 0 18px 50px rgba(15, 23, 42, 0.08);
+                padding: 1rem 1.4rem;
+                background: #ffffff;
+                border: 1px solid #e4e4e7;
+                border-radius: 10px;
                 margin-bottom: 1rem;
             }
-            .hero h1 {
-                font-family: "Avenir Next", "Segoe UI", sans-serif;
-                letter-spacing: 0.02em;
-                margin: 0;
-                font-size: 2.2rem;
-            }
-            .hero p {
-                margin: 0.45rem 0 0 0;
-                color: #31536b;
-                max-width: 58rem;
-            }
+            .hero h1 { margin: 0; font-size: 1.5rem; font-weight: 700; color: #18181b; }
+            .hero p  { margin: 0.2rem 0 0; color: #71717a; font-size: 0.875rem; }
+
+            /* ── Metric / chunk cards ────────────────────────────────────── */
             .metric-card {
-                border: 1px solid rgba(20, 33, 61, 0.08);
-                border-radius: 18px;
-                padding: 0.9rem 1rem;
-                background: rgba(255, 255, 255, 0.82);
-                margin-bottom: 0.8rem;
+                background: #ffffff; border: 1px solid #e4e4e7;
+                border-radius: 8px; padding: 0.65rem 0.85rem; margin-bottom: 0.5rem;
             }
             .metric-card h4 {
-                margin: 0 0 0.2rem 0;
-                font-size: 0.85rem;
-                text-transform: uppercase;
-                letter-spacing: 0.08em;
-                color: #5b7285;
+                margin: 0 0 0.1rem; font-size: 0.7rem; font-weight: 600;
+                text-transform: uppercase; letter-spacing: 0.06em; color: #71717a;
             }
             .metric-card p {
-                margin: 0;
-                font-size: 1.1rem;
-                color: #14213d;
+                margin: 0; font-size: 0.9rem; font-weight: 600;
+                color: #18181b; word-break: break-all;
             }
             .chunk-card {
-                border-left: 4px solid #0ea5e9;
-                background: rgba(255, 255, 255, 0.88);
-                padding: 0.9rem 1rem;
-                border-radius: 14px;
-                margin-bottom: 0.8rem;
+                background: #ffffff; border-left: 2px solid #a1a1aa;
+                border-radius: 6px; padding: 0.65rem 0.85rem;
+                margin-bottom: 0.5rem; color: #18181b; font-size: 0.875rem;
             }
-            .stFileUploader label,
-            .stTextInput label,
-            .stSelectbox label,
-            .stTextArea label,
-            .stNumberInput label,
-            .stRadio label,
-            .stMarkdown,
-            .stCaption,
-            .stStatus label {
-                color: #1f3559 !important;
+
+            /* ── Main-area labels ────────────────────────────────────────── */
+            .stMain .stTextInput label,  .stMain .stNumberInput label,
+            .stMain .stTextArea label,   .stMain .stSelectbox label,
+            .stMain .stFileUploader label, .stMain .stSlider label,
+            .stMain .stCheckbox label,   .stMain .stRadio label,
+            .stMain .stMarkdown p,       .stMain .stCaption p,
+            .stMain .stAlert p {
+                color: #3f3f46 !important;
+                font-size: 0.875rem !important;
             }
+
+            /* ── Text inputs (main) ──────────────────────────────────────── */
+            .stMain .stTextInput input,
+            .stMain .stNumberInput input,
+            .stMain .stTextArea textarea {
+                background: #ffffff !important;
+                color: #18181b !important;
+                border: 1px solid #e4e4e7 !important;
+                border-radius: 6px !important;
+                box-shadow: none !important;
+            }
+            .stMain .stTextInput input:focus,
+            .stMain .stNumberInput input:focus,
+            .stMain .stTextArea textarea:focus {
+                border-color: #a1a1aa !important;
+                box-shadow: none !important;
+                outline: none !important;
+            }
+
+            /* ── Selectbox (main) ────────────────────────────────────────── */
+            .stMain [data-baseweb="select"] > div {
+                background: #ffffff !important;
+                border: 1px solid #e4e4e7 !important;
+                border-radius: 6px !important;
+                color: #18181b !important;
+            }
+
+            /* ── Expanders — main content only (light) ───────────────────── */
+            .stMain [data-testid="stExpander"] {
+                background: #ffffff !important;
+                border: 1px solid #e4e4e7 !important;
+                border-radius: 8px !important;
+                box-shadow: none !important;
+            }
+            .stMain [data-testid="stExpander"] summary {
+                background: #ffffff !important;
+                color: #18181b !important;
+            }
+            .stMain [data-testid="stExpander"] summary p,
+            .stMain [data-testid="stExpander"] summary span {
+                color: #18181b !important;
+            }
+            .stMain [data-testid="stExpander"] > div {
+                background: #ffffff !important;
+                color: #18181b !important;
+            }
+
+            /* ── File uploader ───────────────────────────────────────────── */
             [data-testid="stFileUploaderDropzone"] {
-                background: #1e2430;
-                border: 1px solid rgba(255, 255, 255, 0.08);
+                background: #ffffff !important;
+                border: 1.5px dashed #d4d4d8 !important;
+                border-radius: 8px !important;
             }
-            [data-testid="stFileUploaderDropzone"] * {
-                color: #f4f7fb !important;
+            [data-testid="stFileUploaderDropzone"] span,
+            [data-testid="stFileUploaderDropzone"] p {
+                color: #71717a !important;
             }
-            .stTextInput input {
-                background: #262b36;
-                color: #f7fafc;
+
+            /* ── Buttons (main) — neutral, no colour on hover ────────────── */
+            .stMain .stButton > button {
+                background: #ffffff !important;
+                color: #3f3f46 !important;
+                border: 1px solid #e4e4e7 !important;
+                border-radius: 6px !important;
+                font-weight: 500 !important;
+                padding: 0.35rem 1rem !important;
+                box-shadow: none !important;
+                transition: background 100ms ease !important;
             }
-            .stButton button {
-                background: #162032;
-                color: #f8fafc;
-                border: 1px solid rgba(20, 33, 61, 0.18);
+            .stMain .stButton > button:hover {
+                background: #f4f4f5 !important;
+                border-color: #d4d4d8 !important;
+                color: #18181b !important;
             }
-            .stButton button:hover {
-                background: #1f2d46;
-                color: #ffffff;
+            .stMain .stButton > button:active { background: #e4e4e7 !important; }
+            .stMain .stButton > button:disabled {
+                background: #fafafa !important;
+                border-color: #f4f4f5 !important;
+                color: #a1a1aa !important;
             }
+
+            /* Number input steppers ─────────────────────────────────────── */
+            [data-testid="stNumberInput"] button {
+                background: #f4f4f5 !important;
+                color: #52525b !important;
+                border: 1px solid #e4e4e7 !important;
+                box-shadow: none !important;
+            }
+            [data-testid="stNumberInput"] button:hover {
+                background: #e4e4e7 !important;
+                color: #18181b !important;
+            }
+
+            /* ── Tabs ────────────────────────────────────────────────────── */
             button[data-baseweb="tab"] {
-                color: #1f2937 !important;
-            }
-            button[data-baseweb="tab"] p {
-                color: #1f2937 !important;
-                font-weight: 600;
+                color: #71717a !important;
+                font-weight: 500 !important;
+                background: transparent !important;
             }
             button[data-baseweb="tab"][aria-selected="true"] {
-                color: #111827 !important;
+                color: #18181b !important;
+                font-weight: 600 !important;
             }
-            button[data-baseweb="tab"][aria-selected="true"] p {
-                color: #111827 !important;
+
+            /* ════════════════════════════════════════════════════════════════
+               SIDEBAR — everything here is dark zinc
+            ════════════════════════════════════════════════════════════════ */
+            [data-testid="stSidebar"] {
+                background: #18181b !important;
+            }
+
+            /* Section labels */
+            [data-testid="stSidebar"] h3 {
+                color: #52525b !important;
+                font-size: 0.65rem !important;
+                font-weight: 700 !important;
+                text-transform: uppercase !important;
+                letter-spacing: 0.12em !important;
+                margin: 1.4rem 0 0.3rem !important;
+                padding-bottom: 0.3rem !important;
+                border-bottom: 1px solid #27272a !important;
+            }
+
+            /* All sidebar text labels */
+            [data-testid="stSidebar"] label {
+                color: #a1a1aa !important;
+                font-size: 0.82rem !important;
+            }
+            [data-testid="stSidebar"] .stMarkdown p,
+            [data-testid="stSidebar"] .stCaption p,
+            [data-testid="stSidebar"] li {
+                color: #71717a !important;
+                font-size: 0.82rem !important;
+            }
+
+            /* Sidebar selects */
+            [data-testid="stSidebar"] [data-baseweb="select"] > div {
+                background: #27272a !important;
+                border: 1px solid #3f3f46 !important;
+                border-radius: 6px !important;
+                color: #d4d4d8 !important;
+            }
+            [data-testid="stSidebar"] [data-baseweb="select"] span,
+            [data-testid="stSidebar"] [data-baseweb="select"] div {
+                color: #d4d4d8 !important;
+            }
+
+            /* Sidebar text inputs */
+            [data-testid="stSidebar"] .stTextInput input,
+            [data-testid="stSidebar"] .stNumberInput input {
+                background: #27272a !important;
+                color: #d4d4d8 !important;
+                border: 1px solid #3f3f46 !important;
+                border-radius: 6px !important;
+            }
+            [data-testid="stSidebar"] .stTextInput input::placeholder {
+                color: #52525b !important;
+            }
+
+            /* Sidebar expanders — dark, NOT white */
+            [data-testid="stSidebar"] [data-testid="stExpander"] {
+                background: #27272a !important;
+                border: 1px solid #3f3f46 !important;
+                border-radius: 8px !important;
+            }
+            [data-testid="stSidebar"] [data-testid="stExpander"] summary {
+                background: #27272a !important;
+            }
+            [data-testid="stSidebar"] [data-testid="stExpander"] summary p,
+            [data-testid="stSidebar"] [data-testid="stExpander"] summary span,
+            [data-testid="stSidebar"] [data-testid="stExpander"] > div,
+            [data-testid="stSidebar"] [data-testid="stExpander"] > div * {
+                background: #27272a !important;
+                color: #d4d4d8 !important;
+            }
+            [data-testid="stSidebar"] [data-testid="stExpander"] label {
+                color: #a1a1aa !important;
+            }
+
+            /* Sidebar buttons */
+            [data-testid="stSidebar"] .stButton > button {
+                background: #27272a !important;
+                color: #d4d4d8 !important;
+                border: 1px solid #3f3f46 !important;
+                border-radius: 6px !important;
+                font-weight: 500 !important;
+                box-shadow: none !important;
+            }
+            [data-testid="stSidebar"] .stButton > button:hover {
+                background: #3f3f46 !important;
+                border-color: #52525b !important;
+                color: #f4f4f5 !important;
+            }
+
+            /* Sidebar code spans */
+            [data-testid="stSidebar"] code {
+                background: #27272a !important;
+                color: #a1a1aa !important;
+                border-radius: 4px;
+                padding: 1px 5px;
+                font-size: 0.8rem;
+            }
+
+            /* Sidebar slider track label */
+            [data-testid="stSidebar"] .stSlider label,
+            [data-testid="stSidebar"] .stSlider [data-testid="stTickBarMin"],
+            [data-testid="stSidebar"] .stSlider [data-testid="stTickBarMax"] {
+                color: #71717a !important;
             }
         </style>
         """,
@@ -266,7 +435,7 @@ def render_sidebar(
     model_registry: ModelRegistry,
 ) -> tuple[str, int, str | None, str, AdvancedRetrievalConfig]:
     """Render runtime controls and return (model, max_docs, reasoning_effort, project, adv_config)."""
-    st.sidebar.markdown("## Project")
+    st.sidebar.markdown("### Project")
 
     # ── Project selector (primary) ────────────────────────────────────────────
     existing_projects = list_projects(DATA_DIR)
@@ -316,7 +485,7 @@ def render_sidebar(
                 st.session_state["project_name"] = DEFAULT_PROJECT
                 st.rerun()
 
-    st.sidebar.markdown("## Model")
+    st.sidebar.markdown("### Model")
 
     # ── Model selector (secondary — LLM calls only, not storage) ─────────────
     current_model = st.session_state.get("model_name", get_default_model())
@@ -349,7 +518,7 @@ def render_sidebar(
                 st.session_state["model_name"] = added_model
                 st.rerun()
 
-    st.sidebar.markdown("## Query")
+    st.sidebar.markdown("### Query")
     max_docs = st.sidebar.slider("Max docs", min_value=1, max_value=15, value=3)
     reasoning_options = ["auto", *REASONING_EFFORT_OPTIONS]
     current_reasoning = st.session_state.get("retrieval_reasoning_effort", "auto")
@@ -383,7 +552,7 @@ def render_sidebar(
         )
 
     # ── Advanced retrieval controls ───────────────────────────────────────────
-    st.sidebar.markdown("## Advanced Retrieval")
+    st.sidebar.markdown("### Advanced Retrieval")
     adv_enabled = st.sidebar.toggle(
         "Enable advanced retrieval",
         value=False,
@@ -412,14 +581,14 @@ def render_sidebar(
     st.sidebar.caption("Ingestion reasoning: `high`")
 
     docs = master_tree_store.list_docs()
-    st.sidebar.markdown("## Indexed Docs")
+    st.sidebar.markdown("### Indexed Docs")
     if docs:
         for doc in docs:
             st.sidebar.markdown(f"- `{doc.doc_id}`")
     else:
         st.sidebar.caption("No documents ingested yet.")
 
-    st.sidebar.markdown("## Storage")
+    st.sidebar.markdown("### Storage")
     st.sidebar.caption(f"Project index at `{index_context.index_dir}`.")
 
     return model, max_docs, None if reasoning_effort == "auto" else reasoning_effort, project, adv_config, retrieval_mode_ui
@@ -555,6 +724,44 @@ def create_ingestion_progress_renderer(status):
         _render_recent_events()
 
     return _handle
+
+
+def render_answer_with_images(answer: str, image_refs: list[dict]) -> None:
+    """Render an assistant answer with images interleaved at [IMAGE:img_id] tags.
+
+    The LLM emits [IMAGE:img_id] on its own line where an image is relevant.
+    This function splits on those tags and renders text segments and images
+    in order, so step-by-step content appears with its screenshot inline.
+    """
+    import re
+    from pathlib import Path as _Path
+
+    # Build lookup: img_id → stored path
+    img_lookup: dict[str, str] = {
+        ref["id"]: ref.get("stored", "")
+        for ref in image_refs
+        if ref.get("id")
+    }
+
+    # Split answer on [IMAGE:some_id] tags, keeping the tag as a capture group.
+    parts = re.split(r"(\[IMAGE:[^\]]+\])", answer)
+
+    for part in parts:
+        m = re.match(r"\[IMAGE:([^\]]+)\]", part)
+        if m:
+            img_id = m.group(1).strip()
+            stored = img_lookup.get(img_id, "")
+            if stored:
+                try:
+                    img_bytes = _Path(stored).read_bytes()
+                    # Find matching ref for caption metadata
+                    ref = next((r for r in image_refs if r.get("id") == img_id), {})
+                    caption = f"{ref.get('type', 'image')} · page {ref.get('page', '?')}"
+                    st.image(img_bytes, caption=caption, use_container_width=False)
+                except Exception:
+                    pass
+        elif part.strip():
+            st.markdown(part)
 
 
 def render_ingestion_trace(result: IngestionResult | None) -> None:
@@ -1064,10 +1271,11 @@ def main() -> None:
         st.rerun()
 
     st.markdown(
-        """
+        f"""
         <div class="hero">
             <h1>PageIndex Atlas</h1>
-            <p>Upload documents, inspect the ingestion trace, ask multi-document questions, and see exactly how routing, node selection, and chunk assembly work under the hood. Every index is scoped to a single provider/model.</p>
+            <p>Upload &rarr; ingest &rarr; ask. Project: <strong>{runtime.index_context.project}</strong>
+            &mdash; Model: <strong>{runtime.index_context.model}</strong></p>
         </div>
         """,
         unsafe_allow_html=True,
@@ -1120,8 +1328,19 @@ def main() -> None:
                         "falls back to basic on failure."
                     ),
                 )
+                _is_pdf = uploaded_file is not None and uploaded_file.name.lower().endswith(".pdf")
+                contains_images = st.checkbox(
+                    "Document contains meaningful images",
+                    value=False,
+                    disabled=not _is_pdf,
+                    help=(
+                        "PDF only. When enabled, images are extracted, analysed by GPT-5.4 "
+                        "(vision), and woven into the document text before the tree is built. "
+                        "This improves retrieval of diagram and chart content but adds latency."
+                    ),
+                )
 
-            if st.button("Run Ingestion", use_container_width=True):
+            if st.button("Run Ingestion"):
                 if uploaded_file is None:
                     st.error("Upload a file first.")
                 elif not doc_id or not doc_title or not doc_type:
@@ -1137,6 +1356,7 @@ def main() -> None:
                         with st.status("Running ingestion", expanded=True) as status:
                             st.write(f"Saved upload to `{saved_path}`")
                             progress_handler = create_ingestion_progress_renderer(status)
+                            _contains_images = contains_images
                             result = run_async_task_with_progress(
                                 lambda progress_callback: ingest_document_with_trace(
                                     file_path=str(saved_path),
@@ -1149,6 +1369,7 @@ def main() -> None:
                                     top_sections_target=int(top_sections_target),
                                     progress_callback=progress_callback,
                                     relationship_mode=_rel_mode,
+                                    contains_images=_contains_images,
                                 ),
                                 on_progress=progress_handler,
                             )
@@ -1164,7 +1385,12 @@ def main() -> None:
         st.markdown("### Ask the Index")
         for turn in st.session_state.chat_history:
             with st.chat_message("user" if turn["role"] == "user" else "assistant"):
-                st.markdown(turn["content"])
+                if turn["role"] == "assistant":
+                    render_answer_with_images(
+                        turn["content"], turn.get("image_refs", [])
+                    )
+                else:
+                    st.markdown(turn["content"])
 
         prompt = st.chat_input("Ask about your indexed documents")
         if prompt:
@@ -1244,7 +1470,11 @@ def main() -> None:
             result = _payload
             st.session_state.chat_history = _current_history + [
                 {"role": "user", "content": prompt},
-                {"role": "assistant", "content": result.answer},
+                {
+                    "role": "assistant",
+                    "content": result.answer,
+                    "image_refs": getattr(result, "image_refs", []),
+                },
             ]
             st.session_state.latest_query = result
             st.rerun()

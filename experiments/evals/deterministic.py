@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from experiments.evals.models import (
     DeterministicScorecard,
@@ -13,6 +13,22 @@ from experiments.evals.models import (
     EvaluationSuite,
 )
 from experiments.models import BuildManifest, ComparisonRunManifest, RunEntrySummary
+
+
+ProgressCallback = Callable[[dict[str, Any]], None]
+
+
+def _emit_progress(
+    progress_callback: ProgressCallback | None,
+    event: str,
+    **payload: Any,
+) -> None:
+    if progress_callback is None:
+        return
+    try:
+        progress_callback({"event": event, **payload})
+    except Exception:
+        return
 
 
 def _safe_trace_payload(path: str | None) -> dict[str, Any]:
@@ -48,6 +64,10 @@ def _normalize_question(text: str) -> str:
 
 
 def _matched_case(run: ComparisonRunManifest, suite: EvaluationSuite) -> EvaluationCase | None:
+    if run.suite_id == suite.suite_id and run.case_id:
+        matched = suite.case_lookup().get(run.case_id)
+        if matched is not None:
+            return matched
     expected_case_id = f"run_{run.run_id}"
     for case in suite.cases:
         if case.case_id == expected_case_id:
@@ -212,9 +232,17 @@ def evaluate_runs_deterministically(
     runs: list[ComparisonRunManifest],
     suite: EvaluationSuite,
     build_lookup: dict[str, BuildManifest] | None = None,
+    progress_callback: ProgressCallback | None = None,
 ) -> list[EvaluationEntryResult]:
     """Convert comparison-run manifests into deterministic evaluation results."""
     build_lookup = build_lookup or {}
+    total_entries = sum(len(run.entries) for run in runs)
+    _emit_progress(
+        progress_callback,
+        "deterministic_started",
+        total_entries=total_entries,
+        total_runs=len(runs),
+    )
     completed_entries = [
         entry
         for run in runs
@@ -234,6 +262,7 @@ def evaluate_runs_deterministically(
     }
 
     results: list[EvaluationEntryResult] = []
+    processed_entries = 0
     for run in runs:
         case = _matched_case(run, suite)
         case_id = case.case_id if case else f"run_{run.run_id}"
@@ -248,8 +277,7 @@ def evaluate_runs_deterministically(
                 diagnostics=diagnostics,
                 peer_bounds=peer_bounds,
             )
-            results.append(
-                EvaluationEntryResult(
+            result = EvaluationEntryResult(
                     source_run_id=run.run_id,
                     source_run_title=run.title,
                     case_id=case_id,
@@ -285,5 +313,25 @@ def evaluate_runs_deterministically(
                     scorecard=scorecard,
                     error=entry.error,
                 )
+            results.append(result)
+            processed_entries += 1
+            _emit_progress(
+                progress_callback,
+                "deterministic_entry_completed",
+                processed_entries=processed_entries,
+                total_entries=total_entries,
+                source_run_id=result.source_run_id,
+                case_id=result.case_id,
+                label=result.label,
+                status=result.status,
+                technical_score=(
+                    result.scorecard.technical_score if result.scorecard is not None else None
+                ),
             )
+    _emit_progress(
+        progress_callback,
+        "deterministic_completed",
+        total_entries=total_entries,
+        total_runs=len(runs),
+    )
     return results

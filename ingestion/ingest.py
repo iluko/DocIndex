@@ -12,7 +12,10 @@ from dotenv import load_dotenv
 from rich.console import Console
 
 from ingestion.docx_converter import docx_to_markdown
+from ingestion.image_analyzer import analyze_images
+from ingestion.image_extractor import extract_images_from_pdf
 from ingestion.master_node_gen import generate_master_node
+from ingestion.pdf_enricher import build_enriched_markdown
 from master_tree.master_tree import MasterTreeStore
 from master_tree.relationships import (
     ReconciliationResult,
@@ -203,6 +206,77 @@ async def _run_pageindex(
     return await result if inspect.isawaitable(result) else result
 
 
+def _process_pdf_images(
+    pdf_path: Path,
+    doc_id: str,
+    doc_type: str,
+    model: str,
+    storage: DocumentStore,
+    trace: IngestionTrace,
+) -> Path:
+    """Extract, analyse, and store PDF images; return path to enriched markdown.
+
+    This runs before PageIndex so that image descriptions are woven into the
+    text the tree-builder operates on.
+    """
+    console.print(f"[cyan]Extracting images from PDF for[/cyan] {doc_id}")
+    images = extract_images_from_pdf(str(pdf_path), doc_id)
+
+    _append_trace(
+        trace,
+        "extract_images",
+        f"Extracted {len(images)} content-bearing image(s) from the PDF.",
+        {
+            "image_count": len(images),
+            "pages_with_images": sorted({img.page_num for img in images}),
+        },
+    )
+
+    if not images:
+        # No images — build enriched markdown from text only (no vision calls).
+        console.print(f"[cyan]No images found; building text-only markdown for[/cyan] {doc_id}")
+        enriched_md = build_enriched_markdown(str(pdf_path), [], {})
+        md_path = storage.save_derived_markdown(doc_id, enriched_md)
+        return Path(md_path)
+
+    console.print(f"[cyan]Analysing {len(images)} image(s) via GPT-5.4 for[/cyan] {doc_id}")
+    emit_progress(
+        "image_analysis_started",
+        f"Sending {len(images)} image(s) to GPT-5.4 for analysis.",
+        doc_id=doc_id,
+        image_count=len(images),
+    )
+
+    analyses = analyze_images(images, model=model, doc_id=doc_id, doc_type=doc_type)
+
+    # Save each image to storage and collect the relative paths for placeholders.
+    stored_paths: dict[str, str] = {}
+    for img, analysis in zip(images, analyses):
+        ext = "jpg" if img.mime_type == "image/jpeg" else "png"
+        saved = storage.save_image(doc_id, img.img_id, img.data, ext=ext)
+        stored_paths[img.img_id] = str(saved)
+
+    _append_trace(
+        trace,
+        "analyze_images",
+        f"Analysed {len(analyses)} image(s) with GPT-5.4; stored originals on disk.",
+        [
+            {
+                "img_id": a.img_id,
+                "page": a.page_num,
+                "type": a.image_type,
+                "description": a.description[:120],
+            }
+            for a in analyses
+        ],
+    )
+
+    enriched_md = build_enriched_markdown(str(pdf_path), analyses, stored_paths)
+    md_path = storage.save_derived_markdown(doc_id, enriched_md)
+    console.print(f"[cyan]Saved enriched markdown for[/cyan] {doc_id}")
+    return Path(md_path)
+
+
 def _prepare_ingestion_source(
     original_path: Path,
     doc_id: str,
@@ -275,6 +349,7 @@ async def _ingest_document_impl(
     top_sections_target: int | None = None,
     progress_callback: Callable[[dict], None] | None = None,
     relationship_mode: str | None = None,
+    contains_images: bool = False,
 ) -> IngestionResult:
     """Shared implementation behind both simple and traced ingestion APIs."""
     with progress_context(progress_callback):
@@ -328,6 +403,20 @@ async def _ingest_document_impl(
             storage=storage,
             trace=trace,
         )
+
+        if contains_images and path.suffix.lower() == ".pdf":
+            processing_path = _process_pdf_images(
+                pdf_path=path,
+                doc_id=doc_id,
+                doc_type=doc_type,
+                model=model,
+                storage=storage,
+                trace=trace,
+            )
+            # The fetcher reads from retrieval_path at query time, so it must
+            # point to the enriched markdown — not the original PDF which has
+            # no image text.
+            retrieval_path = str(processing_path)
 
         console.print(f"[cyan]Building PageIndex tree for[/cyan] {doc_id}")
         emit_progress(
@@ -472,6 +561,7 @@ async def ingest_document(
     top_sections_target: int | None = None,
     progress_callback: Callable[[dict], None] | None = None,
     relationship_mode: str | None = None,
+    contains_images: bool = False,
 ) -> MasterNode:
     """Ingest one document and return only the master-tree node."""
     result = await _ingest_document_impl(
@@ -486,6 +576,7 @@ async def ingest_document(
         top_sections_target=top_sections_target,
         progress_callback=progress_callback,
         relationship_mode=relationship_mode,
+        contains_images=contains_images,
     )
     return result.master_node
 
@@ -502,6 +593,7 @@ async def ingest_document_with_trace(
     top_sections_target: int | None = None,
     progress_callback: Callable[[dict], None] | None = None,
     relationship_mode: str | None = None,
+    contains_images: bool = False,
 ) -> IngestionResult:
     """Ingest one document and return the tree plus a detailed trace."""
     return await _ingest_document_impl(
@@ -516,4 +608,5 @@ async def ingest_document_with_trace(
         top_sections_target=top_sections_target,
         progress_callback=progress_callback,
         relationship_mode=relationship_mode,
+        contains_images=contains_images,
     )

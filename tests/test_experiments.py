@@ -17,6 +17,8 @@ from experiments.builds.presets import (
 from experiments.builds.registry import ArtifactBuildRunner
 from experiments.compare import summarize_comparison
 from experiments.corpora import CorpusStore
+from experiments.evals.models import EvaluationCase, EvaluationSuite, JudgeScorecard
+from experiments.evals.registry import EvaluationRunner
 from experiments.models import (
     BuildManifest,
     CorpusDocumentInput,
@@ -483,6 +485,416 @@ def test_experiment_run_runner_persists_manifest_trace_and_reports(
     loaded = run_runner.load_run(manifest.run_id)
     assert loaded.run_id == manifest.run_id
     assert len(run_runner.list_runs()) == 1
+
+
+def test_experiment_run_runner_persists_suite_and_case_metadata(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """Suite-linked runs should retain suite_id and case_id on the manifest."""
+    source = tmp_path / "doc.md"
+    source.write_text("# Title\n\nUseful content.\n", encoding="utf-8")
+
+    store = CorpusStore(tmp_path / "exp")
+    corpus = store.create_corpus(
+        name="Suite Corpus",
+        documents=[CorpusDocumentInput(source_path=str(source), doc_id="doc_alpha")],
+    )
+    build_runner = ArtifactBuildRunner(tmp_path / "exp")
+    build = build_runner.run_build(corpus.corpus_id, rag_standard_preset())
+
+    monkeypatch.setattr(
+        "experiments.runs.registry.get_retrieval_adapter",
+        lambda mode: _FakeRetrievalAdapter(mode=mode),
+    )
+    monkeypatch.setattr(
+        "experiments.runs.registry.answer_from_context",
+        _fake_answer_from_context,
+    )
+
+    run_runner = ExperimentRunRunner(tmp_path / "exp")
+    manifest = run_runner.run_comparison(
+        query="What is the useful content?",
+        model="test-model",
+        entries=[
+            RunEntrySpec(
+                label="RAG Baseline",
+                build_id=build.build_id,
+                retrieval_profile=rag_standard_profile(),
+                answer_profile=aligned_default_answer_profile(),
+            )
+        ],
+        suite_id="golden_suite",
+        case_id="gold_001",
+        question_type="factual",
+    )
+
+    assert manifest.suite_id == "golden_suite"
+    assert manifest.case_id == "gold_001"
+    assert manifest.spec_hash
+
+
+def test_run_suite_batch_creates_one_run_per_case_and_skips_completed_cases(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """Suite batches should create one linked run per case in stable suite order."""
+    source = tmp_path / "doc.md"
+    source.write_text("# Title\n\nUseful content.\n", encoding="utf-8")
+
+    store = CorpusStore(tmp_path / "exp")
+    corpus = store.create_corpus(
+        name="Batch Corpus",
+        documents=[CorpusDocumentInput(source_path=str(source), doc_id="doc_alpha")],
+    )
+    build_runner = ArtifactBuildRunner(tmp_path / "exp")
+    build = build_runner.run_build(corpus.corpus_id, rag_standard_preset())
+
+    monkeypatch.setattr(
+        "experiments.runs.registry.get_retrieval_adapter",
+        lambda mode: _FakeRetrievalAdapter(mode=mode),
+    )
+    monkeypatch.setattr(
+        "experiments.runs.registry.answer_from_context",
+        _fake_answer_from_context,
+    )
+
+    suite = EvaluationSuite(
+        version="2.0",
+        suite_id="golden_batch",
+        name="Golden Batch",
+        created_at="2026-04-07T00:00:00+00:00",
+        cases=[
+            EvaluationCase(
+                case_id="gold_001",
+                question="What is the useful content?",
+                question_type="factual",
+            ),
+            EvaluationCase(
+                case_id="gold_002",
+                question="What is the useful content?",
+                question_type="factual",
+            ),
+            EvaluationCase(
+                case_id="gold_003",
+                question="What content exists?",
+                question_type="factual",
+            ),
+        ],
+    )
+
+    run_runner = ExperimentRunRunner(tmp_path / "exp")
+    entries = [
+        RunEntrySpec(
+            label="RAG Baseline",
+            build_id=build.build_id,
+            retrieval_profile=rag_standard_profile(),
+            answer_profile=aligned_default_answer_profile(),
+        )
+    ]
+
+    first_batch = run_runner.run_suite_batch(
+        suite=suite,
+        entries=entries,
+        model="test-model",
+        title_prefix="Golden Batch Run",
+        batch_size=2,
+    )
+    assert [run.case_id for run in first_batch] == ["gold_001", "gold_002"]
+    assert all(run.suite_id == "golden_batch" for run in first_batch)
+    assert first_batch[0].spec_hash != first_batch[1].spec_hash
+
+    second_batch = run_runner.run_suite_batch(
+        suite=suite,
+        entries=entries,
+        model="test-model",
+        title_prefix="Golden Batch Run",
+        batch_size=2,
+    )
+    assert [run.case_id for run in second_batch] == ["gold_003"]
+    assert run_runner.completed_case_ids_for_suite("golden_batch") == {
+        "gold_001",
+        "gold_002",
+        "gold_003",
+    }
+
+
+def test_run_suite_batch_emits_progress_events(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """Suite batches should emit structured progress events for UI visibility."""
+    source = tmp_path / "doc.md"
+    source.write_text("# Title\n\nUseful content.\n", encoding="utf-8")
+
+    store = CorpusStore(tmp_path / "exp")
+    corpus = store.create_corpus(
+        name="Progress Corpus",
+        documents=[CorpusDocumentInput(source_path=str(source), doc_id="doc_alpha")],
+    )
+    build_runner = ArtifactBuildRunner(tmp_path / "exp")
+    build = build_runner.run_build(corpus.corpus_id, rag_standard_preset())
+
+    monkeypatch.setattr(
+        "experiments.runs.registry.get_retrieval_adapter",
+        lambda mode: _FakeRetrievalAdapter(mode=mode),
+    )
+    monkeypatch.setattr(
+        "experiments.runs.registry.answer_from_context",
+        _fake_answer_from_context,
+    )
+
+    suite = EvaluationSuite(
+        version="2.0",
+        suite_id="golden_progress",
+        name="Golden Progress",
+        created_at="2026-04-07T00:00:00+00:00",
+        cases=[
+            EvaluationCase(
+                case_id="gold_001",
+                question="What is the useful content?",
+                question_type="factual",
+            )
+        ],
+    )
+
+    run_runner = ExperimentRunRunner(tmp_path / "exp")
+    entries = [
+        RunEntrySpec(
+            label="RAG Baseline",
+            build_id=build.build_id,
+            retrieval_profile=rag_standard_profile(),
+            answer_profile=aligned_default_answer_profile(),
+        )
+    ]
+    events: list[dict[str, object]] = []
+
+    manifests = run_runner.run_suite_batch(
+        suite=suite,
+        entries=entries,
+        model="test-model",
+        title_prefix="Golden Progress Run",
+        batch_size=1,
+        progress_callback=events.append,
+    )
+
+    assert len(manifests) == 1
+    assert [event["event"] for event in events] == [
+        "suite_batch_started",
+        "suite_case_started",
+        "comparison_started",
+        "comparison_entry_started",
+        "comparison_entry_completed",
+        "comparison_completed",
+        "suite_case_completed",
+        "suite_batch_completed",
+    ]
+    assert events[2]["case_id"] == "gold_001"
+    assert events[4]["status"] == "completed"
+    assert events[6]["run_id"] == manifests[0].run_id
+
+
+def test_evaluation_runner_auto_uses_attached_suite_and_case_ids(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """Evaluation should auto-load the attached suite when selected runs share one suite_id."""
+    source = tmp_path / "doc.md"
+    source.write_text("# Title\n\nUseful content.\n", encoding="utf-8")
+
+    store = CorpusStore(tmp_path / "exp")
+    corpus = store.create_corpus(
+        name="Eval Corpus",
+        documents=[CorpusDocumentInput(source_path=str(source), doc_id="doc_alpha")],
+    )
+    build_runner = ArtifactBuildRunner(tmp_path / "exp")
+    build = build_runner.run_build(corpus.corpus_id, rag_standard_preset())
+
+    monkeypatch.setattr(
+        "experiments.runs.registry.get_retrieval_adapter",
+        lambda mode: _FakeRetrievalAdapter(mode=mode),
+    )
+    monkeypatch.setattr(
+        "experiments.runs.registry.answer_from_context",
+        _fake_answer_from_context,
+    )
+
+    run_runner = ExperimentRunRunner(tmp_path / "exp")
+    eval_runner = EvaluationRunner(tmp_path / "exp")
+    suite = EvaluationSuite(
+        version="2.0",
+        suite_id="golden_eval",
+        name="Golden Eval",
+        created_at="2026-04-07T00:00:00+00:00",
+        cases=[
+            EvaluationCase(
+                case_id="gold_001",
+                question="What is the useful content?",
+                question_type="factual",
+                ground_truth_answer="Synthetic answer.",
+                gold_sources=["doc_alpha::chunk_0001"],
+            )
+        ],
+    )
+    eval_runner.suites.save_suite(suite)
+
+    run_manifest = run_runner.run_comparison(
+        query="What is the useful content?",
+        model="test-model",
+        entries=[
+            RunEntrySpec(
+                label="RAG Baseline",
+                build_id=build.build_id,
+                retrieval_profile=rag_standard_profile(),
+                answer_profile=aligned_default_answer_profile(),
+            )
+        ],
+        suite_id=suite.suite_id,
+        case_id="gold_001",
+        question_type="factual",
+    )
+
+    evaluation = eval_runner.run_evaluation(
+        source_run_ids=[run_manifest.run_id],
+        persist_suite=False,
+    )
+
+    assert evaluation.suite.suite_id == "golden_eval"
+    assert evaluation.entries[0].case_id == "gold_001"
+    assert evaluation.entries[0].ground_truth_available is True
+    assert evaluation.entries[0].gold_sources_available is True
+
+
+def test_evaluation_runner_emits_incremental_progress_events(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """Evaluation runs should emit deterministic and judge progress updates."""
+    source = tmp_path / "doc.md"
+    source.write_text("# Title\n\nUseful content.\n", encoding="utf-8")
+
+    store = CorpusStore(tmp_path / "exp")
+    corpus = store.create_corpus(
+        name="Eval Progress Corpus",
+        documents=[CorpusDocumentInput(source_path=str(source), doc_id="doc_alpha")],
+    )
+    build_runner = ArtifactBuildRunner(tmp_path / "exp")
+    build = build_runner.run_build(corpus.corpus_id, rag_standard_preset())
+
+    monkeypatch.setattr(
+        "experiments.runs.registry.get_retrieval_adapter",
+        lambda mode: _FakeRetrievalAdapter(mode=mode),
+    )
+    monkeypatch.setattr(
+        "experiments.runs.registry.answer_from_context",
+        _fake_answer_from_context,
+    )
+
+    def fake_score_entries_with_judge(
+        *,
+        entries,
+        suite_lookup,
+        judge_model,
+        judge_reasoning_effort=None,
+        progress_callback=None,
+    ):
+        if progress_callback is not None:
+            progress_callback(
+                {
+                    "event": "judge_started",
+                    "judge_model": judge_model,
+                    "total_entries": len(entries),
+                }
+            )
+        for index, entry in enumerate(entries, start=1):
+            if progress_callback is not None:
+                progress_callback(
+                    {
+                        "event": "judge_entry_started",
+                        "processed_entries": index - 1,
+                        "total_entries": len(entries),
+                        "source_run_id": entry.source_run_id,
+                        "case_id": entry.case_id,
+                        "label": entry.label,
+                    }
+                )
+            entry.judge_scorecard = JudgeScorecard(
+                judge_model=judge_model,
+                overall_quality_score=88.0,
+                business_quality_score=84.0,
+            )
+            entry.judge_error = None
+            if progress_callback is not None:
+                progress_callback(
+                    {
+                        "event": "judge_entry_completed",
+                        "processed_entries": index,
+                        "total_entries": len(entries),
+                        "source_run_id": entry.source_run_id,
+                        "case_id": entry.case_id,
+                        "label": entry.label,
+                        "status": entry.status,
+                        "judge_score": 88.0,
+                        "judge_error": None,
+                    }
+                )
+        if progress_callback is not None:
+            progress_callback(
+                {
+                    "event": "judge_completed",
+                    "judge_model": judge_model,
+                    "total_entries": len(entries),
+                    "judged_entries": len(entries),
+                    "error": None,
+                }
+            )
+        return entries, None
+
+    monkeypatch.setattr(
+        "experiments.evals.registry.score_entries_with_judge",
+        fake_score_entries_with_judge,
+    )
+
+    run_runner = ExperimentRunRunner(tmp_path / "exp")
+    eval_runner = EvaluationRunner(tmp_path / "exp")
+    run_manifest = run_runner.run_comparison(
+        query="What is the useful content?",
+        model="test-model",
+        entries=[
+            RunEntrySpec(
+                label="RAG Baseline",
+                build_id=build.build_id,
+                retrieval_profile=rag_standard_profile(),
+                answer_profile=aligned_default_answer_profile(),
+            )
+        ],
+        question_type="factual",
+    )
+
+    events: list[dict[str, object]] = []
+    evaluation = eval_runner.run_evaluation(
+        source_run_ids=[run_manifest.run_id],
+        persist_suite=False,
+        judge_enabled=True,
+        judge_model="judge-model",
+        progress_callback=events.append,
+    )
+
+    assert evaluation.entries[0].judge_scorecard is not None
+    assert [event["event"] for event in events] == [
+        "evaluation_started",
+        "deterministic_started",
+        "deterministic_entry_completed",
+        "deterministic_completed",
+        "judge_started",
+        "judge_entry_started",
+        "judge_entry_completed",
+        "judge_completed",
+        "evaluation_completed",
+    ]
+    assert events[0]["total_runs"] == 1
+    assert events[2]["technical_score"] is not None
+    assert events[6]["judge_score"] == 88.0
 
 
 def test_experiment_run_runner_skips_incompatible_build_profile_pair(

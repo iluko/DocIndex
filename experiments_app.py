@@ -7,7 +7,7 @@ from html import escape
 import json
 from pathlib import Path
 import tempfile
-from typing import Iterable
+from typing import Any, Iterable
 
 import altair as alt
 import pandas as pd
@@ -16,7 +16,11 @@ import streamlit as st
 from experiments.builds.registry import ArtifactBuildRunner
 from experiments.corpora import CorpusStore
 from experiments.evals.registry import EvaluationRunner
-from experiments.evals.suites import suite_csv_template, suite_json_template
+from experiments.evals.suites import (
+    EvaluationSuiteStore,
+    suite_csv_template,
+    suite_json_template,
+)
 from experiments.models import (
     BuildManifest,
     ComparisonRunManifest,
@@ -593,6 +597,44 @@ def _render_table(df: pd.DataFrame) -> None:
         """,
         unsafe_allow_html=True,
     )
+
+
+def _render_progress_rows(
+    placeholder,
+    *,
+    title: str,
+    rows: list[dict[str, Any]],
+    empty_message: str,
+) -> None:
+    with placeholder.container():
+        if rows:
+            st.markdown(f"**{title}**")
+            _render_table(pd.DataFrame(rows))
+        else:
+            st.caption(empty_message)
+
+
+def _ensure_frame_columns(
+    df: pd.DataFrame,
+    defaults: dict[str, Any],
+) -> pd.DataFrame:
+    frame = df.copy()
+    for column, default in defaults.items():
+        if column not in frame.columns:
+            frame[column] = default
+    return frame
+
+
+def _sort_frame(
+    df: pd.DataFrame,
+    *,
+    by: str | list[str],
+    ascending: bool | list[bool] = True,
+) -> pd.DataFrame:
+    columns = [by] if isinstance(by, str) else list(by)
+    if any(column not in df.columns for column in columns):
+        return df
+    return df.sort_values(by=by, ascending=ascending)
 
 
 def _render_bar_chart(
@@ -1282,7 +1324,38 @@ def _render_builds_tab(store: CorpusStore, build_runner: ArtifactBuildRunner) ->
                     )
 
 
+def _run_label(run: ComparisonRunManifest) -> str:
+    suffixes = [value for value in [run.case_id, run.suite_id] if value]
+    if not suffixes:
+        return f"{run.run_id} · {run.title}"
+    return f"{run.run_id} · {run.title} · {' / '.join(suffixes)}"
+
+
+def _attached_suite_id_for_runs(
+    runs: list[ComparisonRunManifest],
+    suite_map: dict[str, object],
+) -> str | None:
+    attached_suite_ids = {
+        run.suite_id
+        for run in runs
+        if run.suite_id and run.suite_id in suite_map
+    }
+    if len(attached_suite_ids) == 1:
+        return next(iter(attached_suite_ids))
+    return None
+
+
 def _render_run_detail(run: ComparisonRunManifest, *, view_id: str = "detail") -> None:
+    suite_note = (
+        f'<div class="small-note">Golden dataset: {run.suite_id}</div>'
+        if run.suite_id
+        else ""
+    )
+    case_note = (
+        f'<div class="small-note">Case: {run.case_id}</div>'
+        if run.case_id
+        else ""
+    )
     st.markdown(
         f"""
         <div class="section-card">
@@ -1291,6 +1364,8 @@ def _render_run_detail(run: ComparisonRunManifest, *, view_id: str = "detail") -
           <div class="small-note">Query: {run.query}</div>
           <div class="small-note">Question type: {run.question_type}</div>
           <div class="small-note">Model: {run.model}</div>
+          {suite_note}
+          {case_note}
           <div class="small-note">Spec hash: {run.spec_hash or "n/a"}</div>
           <div style="margin-top:0.75rem;">{_status_pill(run.status)}</div>
         </div>
@@ -1435,28 +1510,12 @@ def _render_compare_tab(build_runner: ArtifactBuildRunner, run_runner: Experimen
         options=compatible_profiles,
         default=compatible_profiles,
     )
-    query = st.text_area(
-        "Comparison query",
-        placeholder="Ask one question and compare how the different pipelines answer it.",
-        height=130,
-    )
-    conversation_context = st.text_area(
-        "Optional prior conversation context",
-        placeholder="Leave blank for clean single-turn comparisons.",
-        height=100,
-    )
     model = st.text_input("Model / deployment", value=get_default_model())
     planned_entries = create_run_entries(
         builds=selected_builds,
         selected_profile_ids=selected_profile_ids,
         retrieval_reasoning_effort=_reasoning_value(retrieval_reasoning),
         answer_reasoning_effort=_reasoning_value(answer_reasoning),
-    )
-    question_type = st.selectbox(
-        "Question type",
-        options=list(QUESTION_TYPES),
-        index=0,
-        help="Tagging questions now makes later aggregate comparisons much more useful.",
     )
     entry_count = len(planned_entries)
     if entry_count > 1:
@@ -1483,7 +1542,6 @@ def _render_compare_tab(build_runner: ArtifactBuildRunner, run_runner: Experimen
         "Resume matching incomplete run if one already exists",
         value=True,
     )
-    title = st.text_input("Run title", placeholder="Optional comparison title")
     if planned_entries:
         preview_rows = [
             {
@@ -1500,13 +1558,86 @@ def _render_compare_tab(build_runner: ArtifactBuildRunner, run_runner: Experimen
     else:
         st.info("Select compatible builds and retrieval profiles to create run entries.")
 
-    if st.button("Run Comparison", type="primary", use_container_width=True):
-        if not query.strip():
-            st.error("Enter a comparison query.")
-        elif not planned_entries:
-            st.error("No compatible run entries were created from the current selection.")
-        else:
-            with st.spinner("Running side-by-side comparison..."):
+    question_source = st.radio(
+        "Question source",
+        options=["Single question", "Golden dataset batch"],
+        horizontal=True,
+        help=(
+            "Single question preserves the original one-off comparison flow. "
+            "Golden dataset batch executes the next N suite cases as individual runs."
+        ),
+    )
+
+    if question_source == "Single question":
+        query = st.text_area(
+            "Comparison query",
+            placeholder="Ask one question and compare how the different pipelines answer it.",
+            height=130,
+        )
+        conversation_context = st.text_area(
+            "Optional prior conversation context",
+            placeholder="Leave blank for clean single-turn comparisons.",
+            height=100,
+        )
+        question_type = st.selectbox(
+            "Question type",
+            options=list(QUESTION_TYPES),
+            index=0,
+            help="Tagging questions now makes later aggregate comparisons much more useful.",
+        )
+        title = st.text_input("Run title", placeholder="Optional comparison title")
+
+        if st.button("Run Comparison", type="primary", use_container_width=True):
+            if not query.strip():
+                st.error("Enter a comparison query.")
+            elif not planned_entries:
+                st.error("No compatible run entries were created from the current selection.")
+            else:
+                progress_status = st.empty()
+                progress_detail = st.empty()
+                activity_placeholder = st.empty()
+                activity_rows: list[dict[str, Any]] = []
+
+                def _comparison_progress(event: dict[str, Any]) -> None:
+                    event_name = event.get("event", "")
+                    if event_name == "comparison_started":
+                        progress_status.info(
+                            f"Running `{event['run_id']}` with {event['total_entries']} entry(s)."
+                        )
+                        progress_detail.caption("Preparing retrieval and answer generation.")
+                    elif event_name == "comparison_entry_started":
+                        progress_status.info(
+                            f"Running entry {event['entry_index']}/{event['total_entries']} "
+                            f"for `{event['run_id']}`."
+                        )
+                        progress_detail.caption(f"Active entry: `{event['label']}`")
+                    elif event_name == "comparison_entry_completed":
+                        activity_rows.insert(
+                            0,
+                            {
+                                "entry": event["label"],
+                                "status": event["status"],
+                                "run_id": event["run_id"],
+                            },
+                        )
+                        _render_progress_rows(
+                            activity_placeholder,
+                            title="Entry Activity",
+                            rows=activity_rows[:10],
+                            empty_message="Entry updates will appear here as each retrieval path finishes.",
+                        )
+                        progress_detail.caption(
+                            f"Finished entry {event['entry_index']}/{event['total_entries']}: "
+                            f"`{event['label']}` ({event['status']})."
+                        )
+                    elif event_name == "comparison_completed":
+                        progress_status.success(
+                            f"Run `{event['run_id']}` finished with status `{event['status']}`."
+                        )
+                        progress_detail.caption(
+                            f"Completed {event['completed_entries']} of {event['total_entries']} entry(s)."
+                        )
+
                 manifest = run_runner.run_comparison(
                     query=query,
                     entries=planned_entries,
@@ -1516,12 +1647,261 @@ def _render_compare_tab(build_runner: ArtifactBuildRunner, run_runner: Experimen
                     question_type=question_type,
                     max_concurrency=max_concurrency,
                     resume_existing=resume_existing,
+                    progress_callback=_comparison_progress,
                 )
-            st.session_state["experiments_last_run_id"] = manifest.run_id
-            st.success(f"Completed run `{manifest.run_id}`.")
+                st.session_state["experiments_last_run_id"] = manifest.run_id
+                st.success(f"Completed run `{manifest.run_id}`.")
+    else:
+        suite_store = EvaluationSuiteStore(run_runner.paths.root)
+        available_suites = list(reversed(suite_store.list_suites()))
+        if not available_suites:
+            st.info("Import a golden dataset in the Evaluation tab before running suite batches.")
+        else:
+            suite_map = {suite.suite_id: suite for suite in available_suites}
+            preferred_suite_id = st.session_state.get("experiments_last_eval_suite_id")
+            selected_suite_id = st.selectbox(
+                "Golden dataset",
+                options=[suite.suite_id for suite in available_suites],
+                index=(
+                    [suite.suite_id for suite in available_suites].index(preferred_suite_id)
+                    if preferred_suite_id in suite_map
+                    else 0
+                ),
+                format_func=lambda suite_id: f"{suite_id} · {suite_map[suite_id].name}",
+                help="Each suite case becomes its own comparison run, linked back to the golden dataset.",
+            )
+            suite = suite_map[selected_suite_id]
+            latest_case_runs = run_runner.latest_runs_for_suite(suite.suite_id)
+            completed_case_ids = run_runner.completed_case_ids_for_suite(suite.suite_id)
+            remaining_cases = [
+                case for case in suite.cases if case.case_id not in completed_case_ids
+            ]
+
+            metric_left, metric_mid, metric_right = st.columns(3)
+            with metric_left:
+                _render_metric_card("Suite Cases", str(len(suite.cases)), "Questions in this golden dataset")
+            with metric_mid:
+                _render_metric_card("Completed Cases", str(len(completed_case_ids)), "Cases with at least one completed run")
+            with metric_right:
+                _render_metric_card("Remaining Cases", str(len(remaining_cases)), "Cases that still need a completed run")
+
+            conversation_context = st.text_area(
+                "Optional prior conversation context for every suite question",
+                placeholder="Usually leave blank for clean per-case evaluation runs.",
+                height=100,
+            )
+            title_prefix = st.text_input(
+                "Run title prefix",
+                value=suite.name,
+                help="Each generated run title appends the suite case ID.",
+            )
+            skip_completed_cases = st.checkbox(
+                "Skip cases that already have a completed suite-linked run",
+                value=True,
+            )
+            case_pool = remaining_cases if skip_completed_cases else list(suite.cases)
+            queued_case_count = len(case_pool)
+            if queued_case_count > 1:
+                max_batch_size = min(10, queued_case_count)
+                batch_size = st.slider(
+                    "Cases per batch",
+                    min_value=1,
+                    max_value=max_batch_size,
+                    value=min(5, max_batch_size),
+                    help="Runs are created per question. Batch size only controls how many cases you launch at once.",
+                )
+            elif queued_case_count == 1:
+                batch_size = 1
+                st.text_input(
+                    "Cases per batch",
+                    value="1",
+                    disabled=True,
+                    help="Only one suite case is currently queued with the current filters.",
+                )
+            else:
+                batch_size = 0
+                st.text_input(
+                    "Cases per batch",
+                    value="0",
+                    disabled=True,
+                    help="No suite cases are currently queued with the current filters.",
+                )
+
+            preview_cases = case_pool[:batch_size]
+            preview_rows = [
+                {
+                    "case_id": case.case_id,
+                    "question_type": case.question_type,
+                    "question": case.question,
+                    "has_completed_run": "yes" if case.case_id in completed_case_ids else "no",
+                    "latest_run": latest_case_runs[case.case_id].run_id if case.case_id in latest_case_runs else "",
+                    "latest_status": latest_case_runs[case.case_id].status if case.case_id in latest_case_runs else "",
+                }
+                for case in preview_cases
+            ]
+            if preview_rows:
+                st.markdown("**Next batch preview**")
+                _render_table(pd.DataFrame(preview_rows))
+            else:
+                st.info("No suite cases are currently queued for the next batch with the current filters.")
+
+            if st.button("Run Next Batch", type="primary", use_container_width=True):
+                if not planned_entries:
+                    st.error("No compatible run entries were created from the current selection.")
+                elif not case_pool:
+                    st.error("No suite cases are available for the next batch.")
+                else:
+                    batch_status = st.empty()
+                    batch_detail = st.empty()
+                    batch_progress = st.progress(0)
+                    completed_cases_placeholder = st.empty()
+                    entry_updates_placeholder = st.empty()
+                    completed_batch_rows: list[dict[str, Any]] = []
+                    entry_update_rows: list[dict[str, Any]] = []
+                    total_batch_cases = max(1, len(preview_cases))
+
+                    def _suite_batch_progress(event: dict[str, Any]) -> None:
+                        nonlocal total_batch_cases
+                        event_name = event.get("event", "")
+                        if event_name == "suite_batch_started":
+                            total_batch_cases = max(1, int(event.get("total_cases", 0) or 1))
+                            batch_progress.progress(0)
+                            batch_status.info(
+                                f"Running {event['total_cases']} suite case(s) for `{event['suite_id']}`."
+                            )
+                            batch_detail.caption("Preparing the first suite case.")
+                        elif event_name == "suite_case_started":
+                            batch_status.info(
+                                f"Case {event['case_index']}/{event['total_cases']} "
+                                f"· `{event['case_id']}`"
+                            )
+                            batch_detail.caption(
+                                f"Question type: `{event['question_type']}`. "
+                                f"Question: {event['question'][:140]}"
+                            )
+                        elif event_name == "comparison_started":
+                            batch_detail.caption(
+                                f"Run `{event['run_id']}` started for case `{event.get('case_id') or 'ad_hoc'}` "
+                                f"with {event['total_entries']} entry(s)."
+                            )
+                        elif event_name == "comparison_entry_started":
+                            batch_detail.caption(
+                                f"Case `{event.get('case_id') or 'ad_hoc'}` · "
+                                f"entry {event['entry_index']}/{event['total_entries']}: `{event['label']}`"
+                            )
+                        elif event_name == "comparison_entry_completed":
+                            entry_update_rows.insert(
+                                0,
+                                {
+                                    "case_id": event.get("case_id") or "",
+                                    "entry": event["label"],
+                                    "status": event["status"],
+                                    "run_id": event["run_id"],
+                                },
+                            )
+                            _render_progress_rows(
+                                entry_updates_placeholder,
+                                title="Latest Entry Updates",
+                                rows=entry_update_rows[:12],
+                                empty_message="Entry updates will appear here while retrieval paths finish.",
+                            )
+                            batch_detail.caption(
+                                f"Case `{event.get('case_id') or 'ad_hoc'}` · "
+                                f"finished entry {event['entry_index']}/{event['total_entries']}: "
+                                f"`{event['label']}` ({event['status']})."
+                            )
+                        elif event_name == "suite_case_completed":
+                            completed_batch_rows.append(
+                                {
+                                    "case_id": event["case_id"],
+                                    "run_id": event["run_id"],
+                                    "status": event["status"],
+                                    "title": event["title"],
+                                }
+                            )
+                            batch_progress.progress(
+                                int((int(event["case_index"]) / total_batch_cases) * 100)
+                            )
+                            batch_status.info(
+                                f"Completed case {event['case_index']}/{event['total_cases']} "
+                                f"· `{event['case_id']}` ({event['status']})."
+                            )
+                            _render_progress_rows(
+                                completed_cases_placeholder,
+                                title="Completed in This Batch",
+                                rows=completed_batch_rows,
+                                empty_message="Completed suite cases will appear here.",
+                            )
+                        elif event_name == "suite_batch_completed":
+                            batch_progress.progress(100)
+                            batch_status.success(
+                                f"Finished {event['completed_cases']} suite case(s) for `{event['suite_id']}`."
+                            )
+                            batch_detail.caption("The requested suite batch has finished.")
+
+                    manifests = run_runner.run_suite_batch(
+                        suite=suite,
+                        entries=planned_entries,
+                        model=model,
+                        conversation_context=conversation_context or None,
+                        title_prefix=title_prefix or suite.name,
+                        batch_size=batch_size,
+                        max_concurrency=max_concurrency,
+                        resume_existing=resume_existing,
+                        skip_completed_cases=skip_completed_cases,
+                        progress_callback=_suite_batch_progress,
+                    )
+                    if not manifests:
+                        st.info("No suite runs were created for this batch.")
+                    else:
+                        batch_run_ids = [manifest.run_id for manifest in manifests]
+                        st.session_state["experiments_last_run_id"] = manifests[-1].run_id
+                        st.session_state["experiments_last_suite_batch_run_ids"] = batch_run_ids
+                        st.session_state["experiments_last_eval_suite_id"] = suite.suite_id
+                        st.session_state["experiments_eval_selected_run_ids"] = batch_run_ids
+                        st.session_state["experiments_eval_suite_mode"] = suite.suite_id
+                        st.success(
+                            f"Completed {len(manifests)} suite-linked run(s) for `{suite.suite_id}`."
+                        )
+
+            batch_run_ids = st.session_state.get("experiments_last_suite_batch_run_ids", [])
+            recent_batch_runs = []
+            for run_id in batch_run_ids:
+                try:
+                    recent_batch_runs.append(run_runner.load_run(run_id))
+                except FileNotFoundError:
+                    continue
+            if recent_batch_runs:
+                st.write("")
+                st.subheader("Latest Suite Batch")
+                _render_table(
+                    pd.DataFrame(
+                        [
+                            {
+                                "run_id": run.run_id,
+                                "case_id": run.case_id or "",
+                                "question_type": run.question_type,
+                                "status": run.status,
+                                "title": run.title,
+                            }
+                            for run in recent_batch_runs
+                        ]
+                    )
+                )
+                selected_batch_run_id = st.selectbox(
+                    "Inspect suite batch run",
+                    options=[run.run_id for run in recent_batch_runs],
+                    format_func=lambda run_id: _run_label(
+                        next(run for run in recent_batch_runs if run.run_id == run_id)
+                    ),
+                )
+                _render_run_detail(
+                    next(run for run in recent_batch_runs if run.run_id == selected_batch_run_id),
+                    view_id="compare_suite_batch",
+                )
 
     last_run_id = st.session_state.get("experiments_last_run_id")
-    if last_run_id:
+    if question_source == "Single question" and last_run_id:
         st.write("")
         st.subheader("Latest Run")
         _render_run_detail(run_runner.load_run(last_run_id), view_id="compare_latest")
@@ -1536,7 +1916,7 @@ def _render_runs_tab(run_runner: ExperimentRunRunner) -> None:
     selected_run_id = st.selectbox(
         "Select run",
         options=[run.run_id for run in runs],
-        format_func=lambda run_id: f"{run_id} · {run_runner.load_run(run_id).title}",
+        format_func=lambda run_id: _run_label(run_runner.load_run(run_id)),
     )
     run = run_runner.load_run(selected_run_id)
     has_failed_or_skipped = any(entry.status in {"failed", "skipped"} for entry in run.entries)
@@ -1835,28 +2215,66 @@ def _render_evaluation_tab(
         return
 
     with st.form("generate_evaluation_snapshot_form"):
+        run_options = [run.run_id for run in eligible_runs]
+        persisted_selected_run_ids = [
+            run_id
+            for run_id in st.session_state.get("experiments_eval_selected_run_ids", [])
+            if run_id in run_options
+        ]
+        if not persisted_selected_run_ids:
+            last_suite_batch_run_ids = [
+                run_id
+                for run_id in st.session_state.get("experiments_last_suite_batch_run_ids", [])
+                if run_id in run_options
+            ]
+            if last_suite_batch_run_ids:
+                persisted_selected_run_ids = last_suite_batch_run_ids
+            else:
+                persisted_selected_run_ids = run_options[: min(8, len(run_options))]
+        # Only set the initial value if the widget key hasn't been registered yet.
+        # Writing to a widget-bound key after the widget is instantiated raises
+        # a StreamlitAPIException, so we use setdefault-style logic here.
+        if "experiments_eval_selected_run_ids" not in st.session_state:
+            st.session_state["experiments_eval_selected_run_ids"] = persisted_selected_run_ids
+
+        selected_run_ids = st.multiselect(
+            "Source runs",
+            options=run_options,
+            key="experiments_eval_selected_run_ids",
+            format_func=lambda run_id: _run_label(run_runner.load_run(run_id)),
+        )
+        selected_runs = [
+            run
+            for run in eligible_runs
+            if run.run_id in set(selected_run_ids)
+        ]
         suite_options = ["Ad hoc from selected runs", *[suite.suite_id for suite in available_suites]]
+        auto_suite_id = _attached_suite_id_for_runs(selected_runs, suite_map)
         preferred_suite_id = st.session_state.get("experiments_last_eval_suite_id")
+        current_suite_mode = st.session_state.get("experiments_eval_suite_mode")
+        if auto_suite_id and current_suite_mode in {None, "Ad hoc from selected runs"}:
+            st.session_state["experiments_eval_suite_mode"] = auto_suite_id
+        elif current_suite_mode not in suite_options:
+            st.session_state["experiments_eval_suite_mode"] = (
+                preferred_suite_id
+                if preferred_suite_id in suite_options
+                else "Ad hoc from selected runs"
+            )
+        if auto_suite_id:
+            st.caption(
+                f"Attached golden dataset detected from the selected runs: `{auto_suite_id}`. "
+                "It was preselected automatically."
+            )
         selected_suite_mode = st.selectbox(
             "Evaluation suite",
             options=suite_options,
-            index=(
-                suite_options.index(preferred_suite_id)
-                if preferred_suite_id in suite_options
-                else 0
-            ),
+            key="experiments_eval_suite_mode",
             format_func=lambda value: (
                 "Ad hoc from selected runs"
                 if value == "Ad hoc from selected runs"
                 else f"{value} · {suite_map[value].name}"
             ),
             help="Choose a persisted golden dataset or build an ad hoc suite from the selected runs.",
-        )
-        selected_run_ids = st.multiselect(
-            "Source runs",
-            options=[run.run_id for run in eligible_runs],
-            default=[run.run_id for run in eligible_runs[: min(8, len(eligible_runs))]],
-            format_func=lambda run_id: f"{run_id} · {run_runner.load_run(run_id).title}",
         )
         title = st.text_input(
             "Evaluation snapshot title",
@@ -1884,9 +2302,158 @@ def _render_evaluation_tab(
             index=0,
             disabled=not judge_enabled,
         )
+        selected_entry_count = sum(len(run.entries) for run in selected_runs)
+        judgeable_entry_count = sum(
+            1
+            for run in selected_runs
+            for entry in run.entries
+            if entry.status == "completed"
+        )
+        st.caption(
+            f"Selected runs: `{len(selected_runs)}` · "
+            f"entries to score deterministically: `{selected_entry_count}` · "
+            f"judge calls: `{judgeable_entry_count if judge_enabled else 0}`"
+        )
         submitted = st.form_submit_button("Generate Evaluation Snapshot", use_container_width=True)
 
     if submitted:
+        progress_status = st.empty()
+        progress_detail = st.empty()
+        progress_bar = st.progress(0)
+        live_results_placeholder = st.empty()
+        live_rows: list[dict[str, Any]] = []
+        deterministic_total = max(0, selected_entry_count)
+        judge_total = max(0, judgeable_entry_count if judge_enabled else 0)
+        overall_total = max(1, deterministic_total + judge_total)
+        deterministic_done = 0
+        judge_done = 0
+
+        def _upsert_live_row(
+            *,
+            source_run_id: str | None,
+            case_id: str | None,
+            label: str | None,
+            status: str | None,
+            technical_score: float | None = None,
+            judge_score: float | None = None,
+            judge_error: str | None = None,
+        ) -> None:
+            key = f"{source_run_id or ''}::{case_id or ''}::{label or ''}"
+            for row in live_rows:
+                if row["_key"] == key:
+                    if status is not None:
+                        row["status"] = status
+                    if technical_score is not None:
+                        row["technical_score"] = technical_score
+                    if judge_score is not None:
+                        row["judge_score"] = judge_score
+                    if judge_error is not None:
+                        row["judge_error"] = judge_error
+                    break
+            else:
+                live_rows.insert(
+                    0,
+                    {
+                        "_key": key,
+                        "source_run_id": source_run_id or "",
+                        "case_id": case_id or "",
+                        "label": label or "",
+                        "status": status or "",
+                        "technical_score": technical_score,
+                        "judge_score": judge_score,
+                        "judge_error": judge_error or "",
+                    },
+                )
+            _render_progress_rows(
+                live_results_placeholder,
+                title="Completed Analysis So Far",
+                rows=[
+                    {key: value for key, value in row.items() if key != "_key"}
+                    for row in live_rows[:20]
+                ],
+                empty_message="Completed evaluation rows will appear here as they finish.",
+            )
+
+        def _render_eval_progress(event: dict[str, Any]) -> None:
+            nonlocal deterministic_done, judge_done, overall_total, deterministic_total, judge_total
+            event_name = event.get("event", "")
+            if event_name == "evaluation_started":
+                progress_status.info(
+                    f"Running evaluation `{event['eval_run_id']}` across "
+                    f"{event['total_runs']} run(s) and {event['total_entries']} entry(s)."
+                )
+                progress_detail.caption(
+                    "Preparing deterministic scoring and evaluation suite matching."
+                )
+            elif event_name == "deterministic_started":
+                deterministic_total = max(0, int(event.get("total_entries", 0) or 0))
+                overall_total = max(1, deterministic_total + judge_total)
+                progress_detail.caption(
+                    f"Deterministic scoring started for {event['total_entries']} entry(s)."
+                )
+            elif event_name == "deterministic_entry_completed":
+                deterministic_done = int(event.get("processed_entries", 0) or 0)
+                progress_bar.progress(int(((deterministic_done + judge_done) / overall_total) * 100))
+                progress_status.info(
+                    f"Deterministic scoring {deterministic_done}/{event['total_entries']}."
+                )
+                progress_detail.caption(
+                    f"Finished deterministic scoring for case `{event['case_id']}` · "
+                    f"`{event['label']}`."
+                )
+                _upsert_live_row(
+                    source_run_id=event.get("source_run_id"),
+                    case_id=event.get("case_id"),
+                    label=event.get("label"),
+                    status=event.get("status"),
+                    technical_score=event.get("technical_score"),
+                )
+            elif event_name == "deterministic_completed":
+                progress_detail.caption("Deterministic scoring finished.")
+            elif event_name == "judge_started":
+                judge_total = max(0, int(event.get("total_entries", 0) or 0))
+                overall_total = max(1, deterministic_total + judge_total)
+                progress_status.info(
+                    f"Judge scoring started for {event['total_entries']} completed entry(s)."
+                )
+                progress_detail.caption(
+                    f"Using judge model `{event['judge_model']}`."
+                )
+            elif event_name == "judge_entry_started":
+                progress_status.info(
+                    f"Judge scoring {judge_done + 1}/{event['total_entries']}."
+                )
+                progress_detail.caption(
+                    f"Judging case `{event['case_id']}` · `{event['label']}`."
+                )
+            elif event_name == "judge_entry_completed":
+                judge_done = int(event.get("processed_entries", 0) or 0)
+                progress_bar.progress(int(((deterministic_total + judge_done) / overall_total) * 100))
+                progress_status.info(
+                    f"Judge scoring {judge_done}/{event['total_entries']}."
+                )
+                progress_detail.caption(
+                    f"Finished judge scoring for case `{event['case_id']}` · "
+                    f"`{event['label']}`."
+                )
+                _upsert_live_row(
+                    source_run_id=event.get("source_run_id"),
+                    case_id=event.get("case_id"),
+                    label=event.get("label"),
+                    status=event.get("status"),
+                    judge_score=event.get("judge_score"),
+                    judge_error=event.get("judge_error"),
+                )
+            elif event_name == "judge_completed":
+                progress_detail.caption(
+                    f"Judge scoring finished. Successful judge results: {event.get('judged_entries', 0)}."
+                )
+            elif event_name == "evaluation_completed":
+                progress_bar.progress(100)
+                progress_status.success(
+                    f"Evaluation `{event['eval_run_id']}` finished with status `{event['status']}`."
+                )
+                progress_detail.caption("The full evaluation snapshot is ready below.")
         try:
             manifest = eval_runner.run_evaluation(
                 source_run_ids=selected_run_ids or None,
@@ -1902,13 +2469,17 @@ def _render_evaluation_tab(
                 judge_reasoning_effort=(
                     None if judge_reasoning_effort == "default" else judge_reasoning_effort
                 ),
+                progress_callback=_render_eval_progress,
             )
         except ValueError as exc:
             st.error(str(exc))
         else:
             st.session_state["experiments_last_eval_id"] = manifest.eval_run_id
-            if selected_suite_mode != "Ad hoc from selected runs":
-                st.session_state["experiments_last_eval_suite_id"] = selected_suite_mode
+            # experiments_eval_selected_run_ids is widget-bound (st.multiselect key)
+            # so it already holds selected_run_ids — writing to it again would raise.
+            if manifest.suite.suite_id in suite_map:
+                st.session_state["experiments_last_eval_suite_id"] = manifest.suite.suite_id
+                st.session_state["experiments_eval_suite_mode"] = manifest.suite.suite_id
             st.success(f"Created evaluation snapshot `{manifest.eval_run_id}`.")
 
     evaluations = list(reversed(eval_runner.list_evaluations()))
@@ -1926,6 +2497,16 @@ def _render_evaluation_tab(
     )
     evaluation = eval_runner.load_evaluation(selected_eval_id)
     st.session_state["experiments_last_eval_id"] = evaluation.eval_run_id
+    if evaluation.status == "running":
+        st.info(
+            "This evaluation snapshot is still running. Partial entry-level results may be available "
+            "below, but aggregate leaderboards and charts can remain incomplete until the run finishes."
+        )
+    elif evaluation.status == "failed":
+        st.warning(
+            "This evaluation snapshot is marked failed. Any partial results below were persisted before "
+            "the failure."
+        )
     if evaluation.judge_error:
         st.warning(f"Judge scoring note: {evaluation.judge_error}")
 
@@ -1953,27 +2534,58 @@ def _render_evaluation_tab(
         with card9:
             _render_metric_card("Operator Favorite", summary.operator_favorite_profile or "n/a", "Most human winner selections")
 
-    profile_df = pd.DataFrame(evaluation.aggregate_payload.get("profiles", []))
-    qtype_df = pd.DataFrame(evaluation.aggregate_payload.get("question_types", []))
-    build_df = pd.DataFrame(evaluation.aggregate_payload.get("builds", []))
-    corpus_df = pd.DataFrame(evaluation.aggregate_payload.get("corpora", []))
+    profile_df = _ensure_frame_columns(
+        pd.DataFrame(evaluation.aggregate_payload.get("profiles", [])),
+        {
+            "retrieval_profile_id": "",
+            "artifact_families": "",
+            "avg_technical_score": 0.0,
+            "avg_judge_score": 0.0,
+            "avg_business_score": 0.0,
+            "avg_total_time_seconds": 0.0,
+            "avg_total_tokens": 0.0,
+            "completion_rate": 0.0,
+            "operator_win_rate": 0.0,
+            "avg_tool_calls_made": 0.0,
+            "broadened_routing_rate": 0.0,
+            "tool_budget_exhaustion_rate": 0.0,
+            "content_budget_exhaustion_rate": 0.0,
+            "avg_gold_alignment_score": 0.0,
+            "avg_groundedness_score": 0.0,
+            "avg_source_match_score": 0.0,
+            "missing_required_fact_rate": 0.0,
+            "forbidden_claim_violation_rate": 0.0,
+            "judged_entries": 0.0,
+            "gold_backed_entries": 0.0,
+        },
+    )
+    qtype_df = _ensure_frame_columns(
+        pd.DataFrame(evaluation.aggregate_payload.get("question_types", [])),
+        {
+            "question_type": "",
+            "retrieval_profile_id": "",
+            "avg_technical_score": 0.0,
+            "avg_business_score": 0.0,
+            "avg_judge_score": 0.0,
+        },
+    )
+    build_df = _ensure_frame_columns(
+        pd.DataFrame(evaluation.aggregate_payload.get("builds", [])),
+        {
+            "build_label": "",
+            "retrieval_profile_id": "",
+            "avg_technical_score": 0.0,
+        },
+    )
+    corpus_df = _ensure_frame_columns(
+        pd.DataFrame(evaluation.aggregate_payload.get("corpora", [])),
+        {
+            "corpus_id": "",
+            "retrieval_profile_id": "",
+            "avg_technical_score": 0.0,
+        },
+    )
     entries_df = _evaluation_entries_frame(evaluation)
-    for column in [
-        "avg_judge_score",
-        "avg_business_score",
-        "avg_gold_alignment_score",
-        "avg_groundedness_score",
-        "avg_source_match_score",
-        "missing_required_fact_rate",
-        "forbidden_claim_violation_rate",
-        "judged_entries",
-        "gold_backed_entries",
-    ]:
-        if column not in profile_df.columns:
-            profile_df[column] = 0.0
-    for column in ["avg_judge_score", "avg_business_score"]:
-        if column not in qtype_df.columns:
-            qtype_df[column] = 0.0
     suite_case_frame = pd.DataFrame(
         [
             {
@@ -2017,7 +2629,7 @@ def _render_evaluation_tab(
                     "operator_win_rate",
                     "avg_tool_calls_made",
                 ]
-            ].sort_values(by="avg_technical_score", ascending=False)
+            ].pipe(lambda frame: _sort_frame(frame, by="avg_technical_score", ascending=False))
         )
     else:
         st.info("No profile aggregates are available yet.")
@@ -2025,14 +2637,14 @@ def _render_evaluation_tab(
     chart_left, chart_right = st.columns(2)
     with chart_left:
         _render_bar_chart(
-            profile_df.sort_values(by="avg_technical_score", ascending=False),
+            _sort_frame(profile_df, by="avg_technical_score", ascending=False),
             x="retrieval_profile_id",
             y="avg_technical_score",
             title="Average Technical Score By Profile",
         )
     with chart_right:
         _render_bar_chart(
-            profile_df.sort_values(by="avg_total_time_seconds"),
+            _sort_frame(profile_df, by="avg_total_time_seconds"),
             x="retrieval_profile_id",
             y="avg_total_time_seconds",
             title="Average Total Time By Profile",
@@ -2041,14 +2653,14 @@ def _render_evaluation_tab(
     chart_left, chart_right = st.columns(2)
     with chart_left:
         _render_bar_chart(
-            profile_df.sort_values(by="avg_total_tokens"),
+            _sort_frame(profile_df, by="avg_total_tokens"),
             x="retrieval_profile_id",
             y="avg_total_tokens",
             title="Average Total Tokens By Profile",
         )
     with chart_right:
         _render_bar_chart(
-            profile_df.sort_values(by="operator_win_rate", ascending=False),
+            _sort_frame(profile_df, by="operator_win_rate", ascending=False),
             x="retrieval_profile_id",
             y="operator_win_rate",
             title="Operator Win Rate By Profile",
@@ -2077,14 +2689,14 @@ def _render_evaluation_tab(
         business_left, business_right = st.columns(2)
         with business_left:
             _render_bar_chart(
-                profile_df.sort_values(by="avg_business_score", ascending=False),
+                _sort_frame(profile_df, by="avg_business_score", ascending=False),
                 x="retrieval_profile_id",
                 y="avg_business_score",
                 title="Average Business Score By Profile",
             )
         with business_right:
             _render_bar_chart(
-                profile_df.sort_values(by="avg_gold_alignment_score", ascending=False),
+                _sort_frame(profile_df, by="avg_gold_alignment_score", ascending=False),
                 x="retrieval_profile_id",
                 y="avg_gold_alignment_score",
                 title="Average Gold Alignment By Profile",
@@ -2160,11 +2772,11 @@ def _render_evaluation_tab(
 
     if not build_df.empty:
         st.markdown("**Build × Profile Rollup**")
-        _render_table(build_df.sort_values(by="avg_technical_score", ascending=False))
+        _render_table(_sort_frame(build_df, by="avg_technical_score", ascending=False))
 
     if not corpus_df.empty:
         st.markdown("**Corpus × Profile Rollup**")
-        _render_table(corpus_df.sort_values(by="avg_technical_score", ascending=False))
+        _render_table(_sort_frame(corpus_df, by="avg_technical_score", ascending=False))
 
     st.subheader("Entry Deep Dive")
     if entries_df.empty:
@@ -2196,7 +2808,8 @@ def _render_evaluation_tab(
             filtered_entries = filtered_entries[filtered_entries["status"] == status_filter]
 
         _render_table(
-            filtered_entries.sort_values(
+            _sort_frame(
+                filtered_entries,
                 by=["judge_score", "technical_score", "total_time_seconds"],
                 ascending=[False, False, True],
             )

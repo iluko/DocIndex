@@ -41,6 +41,7 @@ from dataclasses import dataclass, field
 from dotenv import load_dotenv
 from rich.console import Console
 
+from ingestion.pdf_enricher import parse_image_refs
 from master_tree.master_tree import MasterTreeStore
 from retrieval.fetcher import (
     RetrievedChunk,
@@ -180,6 +181,8 @@ class QueryResult:
     trace: QueryTrace | None = None
     sources: list[SourceReference] = field(default_factory=list)
     metrics: QueryMetrics | None = None
+    image_refs: list[dict] = field(default_factory=list)
+    """IMAGE_REF blocks found in the retrieved context, if any."""
 
 
 @dataclass
@@ -291,20 +294,28 @@ def _build_answer_system_prompt(
       calibrates confidence rather than asserting false certainty.
     """
     domain_name = get_domain_name()
+    image_instruction = (
+        " When your answer references an image from the context, insert a "
+        "placeholder on its own line in the exact position where the image is "
+        "relevant, using this format: [IMAGE:img_id] — where img_id is the id "
+        "value from the IMAGE_REF block in the retrieved context. Only emit "
+        "[IMAGE:img_id] tags for images that genuinely illustrate the answer at "
+        "that point. Do not group them all at the end."
+    )
     if domain_name:
         intro = (
             f"You are an expert assistant for {domain_name}. "
             "Answer the user's question using ONLY the retrieved document context "
             "provided. Use inline citations like [doc_id, p.N–M] when drawing on specific sections. End your answer with a **Sources** block. "
             "If the context does not contain sufficient information to answer, "
-            "say so clearly."
+            f"say so clearly.{image_instruction}"
         )
     else:
         intro = (
             "You are a knowledgeable assistant. Answer the user's question using "
             "ONLY the retrieved document context provided. Use inline citations like [doc_id, p.N–M] when drawing on specific sections. End your answer with a **Sources** block. "
             "If the context does not contain "
-            "sufficient information to answer, say so clearly."
+            f"sufficient information to answer, say so clearly.{image_instruction}"
         )
 
     caveats: list[str] = []
@@ -898,6 +909,7 @@ async def query(
                 selected_nodes=selected_nodes,
                 retrieved_context=retrieved_context,
                 sources=[],
+                image_refs=parse_image_refs(retrieved_context),
                 trace=QueryTrace(
                     routed_docs=selected_doc_ids,
                     navigation=navigation_map,
@@ -984,6 +996,7 @@ async def query(
             selected_nodes=selected_nodes,
             retrieved_context=retrieved_context,
             sources=sources,
+            image_refs=parse_image_refs(retrieved_context),
             trace=QueryTrace(
                 routed_docs=selected_doc_ids,
                 navigation=navigation_map,

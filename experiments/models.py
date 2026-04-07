@@ -328,13 +328,14 @@ class ComparisonSummary(BaseModel):
 class ComparisonRunManifest(BaseModel):
     """Persisted manual-comparison run across multiple entries."""
 
-    version: str = "1.0"
+    version: str = "1.1"
     run_id: str
     title: str
     query: str
     conversation_context: str | None = None
     question_type: str = "unspecified"
     suite_id: str | None = None
+    case_id: str | None = None
     created_at: str
     completed_at: str | None = None
     model: str
