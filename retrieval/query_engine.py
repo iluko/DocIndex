@@ -397,6 +397,7 @@ async def _run_hybrid(
     max_nodes: int,
     node_expansion: bool,
     answer_token_callback: Callable[[str], None] | None = None,
+    retrieval_only: bool = False,
 ) -> tuple[
     str,            # answer
     list[str],      # selected_nodes (primary only)
@@ -482,19 +483,22 @@ async def _run_hybrid(
     conversation_block = render_conversation_context(conversation_context)
 
     # ── Step 5: Answer ────────────────────────────────────────────────────────
-    system_prompt = _build_answer_system_prompt(
-        retrieved_context=retrieved_context,
-        truncated=fetch_result.truncated,
-        routing_broadened=routing_broadened,
-    )
-    user_prompt = f"{user_query}\n\n{conversation_block}".strip()
-
-    if answer_token_callback is not None:
-        answer = await _answer_query_streaming(
-            model, system_prompt, user_prompt, reasoning_effort, answer_token_callback
-        )
+    if retrieval_only:
+        answer = ""
     else:
-        answer = await _answer_query(model, system_prompt, user_prompt, reasoning_effort)
+        system_prompt = _build_answer_system_prompt(
+            retrieved_context=retrieved_context,
+            truncated=fetch_result.truncated,
+            routing_broadened=routing_broadened,
+        )
+        user_prompt = f"{user_query}\n\n{conversation_block}".strip()
+
+        if answer_token_callback is not None:
+            answer = await _answer_query_streaming(
+                model, system_prompt, user_prompt, reasoning_effort, answer_token_callback
+            )
+        else:
+            answer = await _answer_query(model, system_prompt, user_prompt, reasoning_effort)
 
     return (
         answer,
@@ -721,6 +725,7 @@ async def query(
     project: str = "default",
     advanced_retrieval: AdvancedRetrievalConfig | None = None,
     retrieval_mode: str | None = None,
+    retrieval_only: bool = False,
 ) -> QueryResult:
     """Execute the complete retrieval workflow for one user question.
 
@@ -744,6 +749,16 @@ async def query(
     one via ``AdvancedRetrievalConfig.from_env()``) to enable optional features:
     query planning, adaptive width, and node-neighborhood expansion.  When
     ``advanced_retrieval`` is None the env-var defaults apply.
+
+    Retrieval-only mode
+    -------------------
+    Pass ``retrieval_only=True`` to stop the pipeline after context is fetched
+    and skip the final answer-generation LLM call.  The returned ``QueryResult``
+    will have ``answer=""`` and all other retrieval fields populated as normal.
+    Use this when your own answer engine will consume ``retrieved_context`` and
+    ``sources`` directly.  Note: in ``pageindex`` mode the agentic tool loop
+    still runs to completion (retrieval and answering are coupled), but the
+    answer text is discarded and ``answer=""`` is returned.
     """
     model = model or get_default_model()
     # Explicit retrieval_mode param takes precedence over the env-var default.
@@ -904,7 +919,7 @@ async def query(
                 )
             )
             _pi_result = QueryResult(
-                answer=answer,
+                answer="" if retrieval_only else answer,
                 selected_docs=selected_doc_ids,
                 selected_nodes=selected_nodes,
                 retrieved_context=retrieved_context,
@@ -979,6 +994,7 @@ async def query(
             answer_token_callback=(
                 _wrapped_answer_token if answer_token_callback is not None else None
             ),
+            retrieval_only=retrieval_only,
         )
 
         sources = [

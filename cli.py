@@ -288,6 +288,18 @@ def ingest(
         "Defaults to the RETRIEVAL_MODE env var (currently: hybrid)."
     ),
 )
+@click.option(
+    "--retrieval-only",
+    "retrieval_only",
+    is_flag=True,
+    default=False,
+    help=(
+        "Stop after context retrieval — skip the final answer LLM call. "
+        "Prints the retrieved context and sources so you can pipe them into "
+        "your own answer engine. In pageindex mode the agentic loop still runs "
+        "(retrieval and answering are coupled), but the answer text is discarded."
+    ),
+)
 def query_command(
     user_query: str,
     max_docs: int,
@@ -303,6 +315,7 @@ def query_command(
     max_docs_cap: int,
     max_nodes_cap: int,
     retrieval_mode: str | None,
+    retrieval_only: bool,
 ) -> None:
     """Run interactive querying with optional follow-up turns."""
     runtime = _build_runtime(model, project=project)
@@ -325,6 +338,11 @@ def query_command(
         f"Retrieval mode: {resolved_retrieval_mode}"
         f"  |  Reasoning: {normalize_reasoning_effort(reasoning_effort) or 'auto'}"
     )
+    if retrieval_only:
+        console.print(
+            "[yellow]Retrieval-only mode — answer generation is skipped. "
+            "Returning context and sources for use in an external answer engine.[/yellow]"
+        )
     if resolved_retrieval_mode == "pageindex":
         console.print(
             "[yellow]PageIndex mode — agentic, higher latency/cost. "
@@ -361,10 +379,19 @@ def query_command(
                 project=runtime.index_context.project,
                 advanced_retrieval=adv_config,
                 retrieval_mode=resolved_retrieval_mode,
+                retrieval_only=retrieval_only,
             )
         )
 
-        if use_stream:
+        if retrieval_only:
+            console.print(Panel(result.retrieved_context, title="Retrieved Context", expand=False))
+            if result.sources:
+                console.print("Sources:")
+                for src in result.sources:
+                    console.print(f"  [{src.doc_id}] {src.section} (p.{src.page_range})")
+            console.print(f"Selected docs: {result.selected_docs}")
+            console.print(f"Selected nodes: {result.selected_nodes}")
+        elif use_stream:
             console.print()  # newline after streamed answer
         else:
             console.print(Panel(result.answer, title="Answer", expand=False))
@@ -422,10 +449,11 @@ def query_command(
                 for src in result.sources:
                     console.print(f"  [{src.doc_id}] {src.section} (p.{src.page_range})")
 
-        chat_history = chat_history + [
-            {"role": "user", "content": current_query},
-            {"role": "assistant", "content": result.answer},
-        ]
+        if not retrieval_only:
+            chat_history = chat_history + [
+                {"role": "user", "content": current_query},
+                {"role": "assistant", "content": result.answer},
+            ]
         follow_up = console.input("Follow-up (or 'exit'): ").strip()
         if follow_up.lower() == "exit":
             break

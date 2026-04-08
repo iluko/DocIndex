@@ -177,6 +177,7 @@ async def run_query(payload: QueryRequest) -> Any:
                 max_nodes_cap=payload.advanced_retrieval.max_nodes_cap,
             ),
             retrieval_mode=payload.retrieval_mode,
+            retrieval_only=payload.retrieval_only,
         )
     except Exception as exc:  # pragma: no cover - runtime path
         raise HTTPException(status_code=500, detail=str(exc)) from exc

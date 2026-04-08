@@ -40,6 +40,7 @@ class QueryRequest(BaseModel):
     advanced_retrieval: AdvancedRetrievalPayload = Field(
         default_factory=AdvancedRetrievalPayload
     )
+    retrieval_only: bool = False
 
 
 class IngestionMetadata(BaseModel):
