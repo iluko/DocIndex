@@ -7,48 +7,89 @@ Primary code:
 - `master_tree/relationships.py`
 - `master_tree/factory.py`
 - `master_tree/mongo_master_tree.py`
+- `ingestion/master_node_gen.py`
 
 ## Purpose
 
-The master tree is the project-level routing index.
+The master tree is the cross-document routing layer.
 
-It does not store every document chunk. Instead, it stores one summary node per document so the router can decide which documents are worth opening during query time.
+It does not store full document content. It stores one compact, high-signal `MasterNode` per ingested document so the router can decide which documents are worth opening for a given query.
 
-## Master Node Schema
+If per-document PageIndex trees are the document-detail index, the master tree is the project-level directory.
 
-Each `MasterNode` stores:
+## What A Master Node Represents
 
-- `doc_id`
-- `doc_title`
-- `doc_type`
-- `file_path`
-- `tree_path`
-- `doc_summary`
-- `key_topics`
-- `relevance_hints`
-- `top_sections`
-- `related_docs`
-- `ingested_at`
-- `routing_facets` optional bundle
+A `MasterNode` is the routing identity of one document.
 
-### `relevance_hints`
+It packages together:
 
-This sub-structure encodes:
+- stable document identity
+- a concise document summary
+- topic and category cues
+- selected “top sections” from the document tree
+- optional routing facets
+- related-document hints
 
-- best use cases
-- known non-use cases
-- key categories
+This is the representation the router sees before any document tree is opened.
 
-### `top_sections`
+## Why The Master Tree Exists At All
 
-These are pre-selected, high-value sections from the document tree. They serve two purposes:
+Without the master tree, the system would have to inspect every document tree for every query, which would be too slow and too expensive.
 
-- richer routing context for the document as a whole
-- a fallback when the navigator cannot confidently select nodes
+The master tree solves that by separating retrieval into two stages:
 
-### `routing_facets`
+1. document-level routing
+2. within-document navigation
 
-This newer optional metadata bundle adds more structured routing cues:
+That design is why master-node generation quality matters so much. Weak master nodes produce weak document routing even if the underlying PageIndex trees are good.
+
+## Core Schema Fields
+
+The exact schema lives in `master_tree/schema.py`, but the most important fields are:
+
+| Field | Role |
+| --- | --- |
+| `doc_id` | stable machine identifier |
+| `doc_title` | human-readable label |
+| `doc_type` | descriptive category |
+| `file_path` | original source path |
+| `tree_path` | persisted per-document tree path |
+| `doc_summary` | dense routing summary of the whole document |
+| `key_topics` | fast topical cues |
+| `relevance_hints` | best-use and not-use guidance |
+| `top_sections` | selected high-value node refs and summaries |
+| `related_docs` | cross-document adjacency hints |
+| `routing_facets` | structured workflow/system/actor/edge-case metadata |
+| `ingested_at` | timestamp of node creation |
+
+## `relevance_hints`
+
+This field gives the router more operational guidance than a plain summary can.
+
+It can encode:
+
+- what kinds of questions the document is useful for
+- what kinds of questions it is not useful for
+- high-level key categories
+
+That lets the router reason about fit, not just similarity.
+
+## `top_sections`
+
+`top_sections` are the most important node refs surfaced from the document tree into the master node.
+
+They serve two purposes:
+
+1. they make the document’s most relevant internal regions visible at routing time
+2. they provide a fallback when the navigator later fails to choose nodes confidently
+
+This makes `top_sections` a bridge between document-level routing and node-level retrieval.
+
+## `routing_facets`
+
+This is newer structured metadata designed to make routing more precise without dumping the full tree into the router prompt.
+
+Possible facet groups include:
 
 - workflows
 - actors
@@ -56,29 +97,25 @@ This newer optional metadata bundle adds more structured routing cues:
 - edge cases
 - authority hints
 
-It makes the master-tree prompt more informative without loading the full per-document tree.
+The code intentionally includes only non-empty facet lists in the LLM context so the prompt stays compact.
 
-## Store Responsibilities
+### Backward compatibility nuance
 
-`MasterTreeStore` is the local JSON-backed store for:
+Older master nodes may not have `routing_facets`. The store and serializer are written so older nodes still load and route correctly.
 
-- loading the project master tree
-- adding or updating nodes
-- removing nodes
-- listing documents
-- rendering the tree into the LLM-facing routing context
+## What The Router Actually Sees
 
-The factory layer can also return a Mongo-backed implementation when the storage backend is switched.
+`MasterTreeStore.to_llm_context()` serializes only routing-relevant fields.
 
-## What The Router Sees
+It intentionally omits operational noise such as:
 
-`MasterTreeStore.to_llm_context()` serializes the master nodes into the routing prompt.
+- raw file paths
+- timestamps
+- storage bookkeeping
 
-The router therefore sees document-level metadata only, not full node text.
+The router sees a condensed representation built from:
 
-The context can include:
-
-- document title and type
+- document identity
 - document summary
 - key topics
 - relevance hints
@@ -86,91 +123,165 @@ The context can include:
 - related docs
 - routing facets when present
 
-This is why the quality of master-node generation matters so much: it is the document-selection layer for the whole project.
+That serializer is one of the most important boundaries in the system because it controls the quality and size of the router prompt.
 
-## Relationship Maintenance Modes
+## `MasterTreeStore`
 
-`master_tree/relationships.py` defines three ingestion-time modes.
+The store is a thin persistence and CRUD layer over the master tree JSON file.
+
+It supports:
+
+- load
+- save
+- add or upsert a node by `doc_id`
+- get one node
+- list all docs
+- remove one node
+- render the tree into LLM routing context
+
+The local implementation writes the full tree to one JSON file. The factory can return a Mongo-backed implementation when the runtime backend is switched.
+
+## Relationship Maintenance
+
+`related_docs` is maintained at ingestion time. It is not primarily a query-time feature today.
+
+The repository currently defines three maintenance modes.
 
 ### `off`
 
-- no reconciliation
-- closest to the original behavior
-- preserves whatever links exist after master-node generation
+Do no reconciliation after master-node generation.
+
+This is the closest behavior to the older implementation and is useful as a baseline.
 
 ### `basic`
 
-Deterministic cleanup only.
+Run deterministic cleanup over the new document’s local neighborhood.
 
-It:
+The affected neighborhood is:
 
-- removes self-links
-- removes unknown docs
-- deduplicates while preserving order
-- caps `related_docs` length
-- enforces symmetric direct relationships inside the affected neighborhood
+- the new document
+- documents it points to
+- documents that already point to it
 
-It makes zero extra LLM calls.
+The basic reconciler enforces:
+
+- no self-links
+- no unknown doc IDs
+- deduplication while preserving order
+- bounded list length
+- symmetry when capacity allows
+
+This mode uses zero extra LLM calls.
 
 ### `enhanced`
 
-Enhanced mode adds a bounded LLM-assisted refinement pass before basic cleanup.
+Run a bounded LLM-assisted refinement for the new document’s `related_docs`, then run basic cleanup and symmetry.
 
-The current algorithm is:
+The algorithm is:
 
-1. score candidate neighbors deterministically from metadata overlap
-2. shortlist the best candidates
-3. ask the LLM which candidates should remain related
+1. score candidate neighbors deterministically from overlap signals
+2. shortlist the strongest candidates
+3. ask an LLM which candidates are meaningfully related
 4. apply the selected set to the new document
 5. run basic reconciliation for symmetry and cleanup
 
-If the LLM step fails, the code falls back to basic mode.
+If the LLM call fails or the response is invalid, the code falls back to basic mode.
 
-## Candidate Scoring In Enhanced Mode
+## Deterministic Candidate Scoring In Enhanced Mode
 
-Candidate ranking is deterministic before the LLM is called.
+Before the LLM is called, candidate ranking is based on metadata overlap.
 
-Signals:
+Signals include:
 
-- exact overlap in `key_topics`
-- exact overlap in relevance-hint categories
-- overlap in routing facets such as workflows, systems, and actors
-- bonus when a link already exists in either direction
+- shared `key_topics`
+- shared relevance-hint categories
+- shared routing facets such as workflows, systems, and actors
+- existing links in either direction
 
-Hard-coded bounds:
+Important caps:
 
-- shortlist computed: `8`
-- max candidates shown to LLM: `6`
-- max related docs retained per node: `10`
+- shortlist size: `8`
+- max candidates shown to the LLM: `6`
+- max related docs per node after cleanup: `10`
+
+These caps are part of the design. Enhanced mode is intentionally bounded rather than open-ended.
 
 ## Reconciliation Trace
 
-Relationship maintenance returns a `ReconciliationResult` that can be embedded in ingestion traces.
+The reconciliation layer returns a `ReconciliationResult` that is attached to ingestion traces.
 
 It records:
 
 - requested mode
-- whether reconciliation actually ran
-- affected doc IDs
-- before/after `related_docs`
-- candidate shortlist
-- whether enhanced mode ran
-- whether fallback was used
+- whether reconciliation ran
+- affected document IDs
+- before-state links
+- after-state links
+- enhanced candidate shortlist
+- whether the enhanced LLM pass actually ran
+- whether fallback to basic was used
 
-That trace is useful when debugging why links changed after an ingestion run.
+This is what lets operators inspect not only that links changed, but why they changed.
 
-## Current Non-Features
+## What This Module Does Not Do
 
-The file explicitly calls out future work that is not implemented yet:
+This is the important subtlety many readers miss:
 
-- query-time graph-aware expansion over `related_docs`
-- richer edge semantics such as strength or dependency type
+- the module builds and cleans `related_docs`
+- the module does not yet drive a first-class query-time graph walk over those links
 
-This is important because `related_docs` today is mostly routing metadata and inspection metadata. It is not yet a first-class graph traversal subsystem in the main query pipeline.
+That future direction is explicitly noted in `master_tree/relationships.py` as later-level work.
 
-## Practical Implications
+So `related_docs` is currently:
 
-- Better master nodes usually matter more than adding more documents to the corpus, because routing starts here.
-- `related_docs` maintenance improves metadata hygiene, but it does not automatically widen retrieval at query time.
-- `top_sections` gives the runtime a stable fallback when navigation is uncertain.
-- `routing_facets` allow the router and experiments planner to encode richer document purpose without loading raw section text.
+- router-visible metadata
+- operator-visible relationship context
+- future expansion scaffolding
+
+It is not yet a dedicated graph-retrieval subsystem.
+
+## Flow Guide
+
+### Flow: ingest one document
+
+1. master-node generation produces an initial `related_docs` list
+2. the node is upserted into the master tree
+3. optional relationship reconciliation adjusts the local neighborhood
+4. the master tree is saved
+
+### Flow: route a query
+
+1. the router receives the serialized master-tree context
+2. it chooses documents using document summaries, hints, top sections, and optional routing facets
+3. only after that does the system open any document trees
+
+### Flow: delete a document
+
+1. remove the master node by `doc_id`
+2. save the master tree
+3. remove associated tree/source/derived-markdown artifacts from the document store
+
+### Flow: compare PageIndex relationship variants in experiments
+
+1. `pageindex_base` leaves `related_docs` unreconciled
+2. `pageindex_related_basic` applies deterministic cleanup
+3. `pageindex_related_enhanced` applies bounded LLM refinement plus cleanup
+
+All three still emit the same artifact family: `pageindex_tree`.
+
+## What Is Possible In This Module
+
+This module can currently:
+
+- persist one compact routing node per document
+- expose router-friendly summaries of the whole project
+- store structured routing facets
+- provide top-section fallback hints
+- maintain related-doc metadata deterministically or with a bounded LLM assist
+- preserve backward compatibility with older master-tree nodes
+
+## Current Constraints
+
+- Query-time graph traversal over `related_docs` is not yet implemented as a first-class retrieval step.
+- Relationship maintenance happens only when a document is ingested or rebuilt.
+- The router relies heavily on the quality of the generated master node, so bad summarization here can degrade routing even when the underlying tree is correct.

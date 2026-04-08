@@ -1,184 +1,302 @@
 # Architecture Map
 
-This document describes the base architecture of the repository, the major module boundaries, and the flows that connect them.
+This document is the high-level map of the repository. It explains what the system is, how the major subsystems fit together, which artifact families exist, and which execution paths are available today.
 
-## What The System Is
+## What This Repository Actually Contains
 
-Hybrid Approach is a document-ingestion and question-answering system built around PageIndex-style document trees plus a project-level routing layer.
+The repository contains two connected but distinct systems.
 
-The codebase actually contains two related systems:
+### 1. The main runtime
 
-- The main runtime, which ingests documents into project-scoped indexes under `data/indexes/` and answers questions through the CLI, Streamlit app, or FastAPI adapter.
-- The experiments harness, which registers corpora, builds isolated artifact variants, runs controlled comparisons, and writes reports under `experiments/artifacts/`.
+This is the operational document QA system exposed through:
 
-## Top-Level Module Map
+- `app.py` for the main Streamlit UI
+- `cli.py` for local command-line use
+- `api/app.py` for the FastAPI adapter
+- `frontend/` for the React client that talks to FastAPI
 
-| Area | Primary files | Responsibility |
+The main runtime persists project-scoped knowledge under `data/indexes/{project}/`.
+
+### 2. The experiments harness
+
+This is a separate lab environment exposed through:
+
+- `experiments/` for corpus, build, run, report, and evaluation logic
+- `experiments_app.py` for the experiments Streamlit UI
+
+The experiments harness persists its own isolated state under `experiments/artifacts/`.
+
+That isolation is architectural, not cosmetic. The experiments system is designed to compare variants without contaminating the main runtime’s active knowledge base.
+
+## The System In One Sentence
+
+Hybrid Approach ingests documents into PageIndex-style per-document trees plus a project-level master tree, then answers questions through either a deterministic staged retrieval pipeline or a more agentic PageIndex tool loop.
+
+## The Four Main Planes
+
+You can understand the repository by splitting it into four planes.
+
+| Plane | Main code | What it owns |
 | --- | --- | --- |
-| Runtime foundation | `index_registry.py`, `utils.py`, `model_registry.py` | Runtime assembly, project/model resolution, env-driven config, provider compatibility |
-| Ingestion | `ingestion/` | Convert source documents into PageIndex trees and master-tree routing nodes |
-| Routing metadata | `master_tree/` | Store document summaries, top sections, routing facets, and related-doc links |
-| Persistence | `storage/` | Save per-document trees, derived markdown, sources, and local images |
-| Retrieval | `retrieval/` | Router, navigator, verifier, fetcher, advanced retrieval overlays, and PageIndex tool loop |
-| Tracing | `traces/` | Audit traces, metrics, trace stats, and post-hoc analysis |
-| Interfaces | `cli.py`, `app.py`, `api/` | Human and programmatic entrypoints |
-| React UI | `frontend/` | Thin frontend over the FastAPI adapter |
-| Experiments | `experiments/`, `experiments_app.py` | Isolated corpora, builds, comparison runs, reports, and evaluation |
-| Vendor dependency | `PageIndex/` | Upstream PageIndex code loaded lazily during ingestion |
+| Runtime plane | `index_registry.py`, `utils.py`, `model_registry.py` | project/model resolution, environment config, shared client setup, storage factory wiring |
+| Knowledge plane | `ingestion/`, `master_tree/`, `storage/` | document preprocessing, PageIndex trees, master nodes, source-path registration, relationship maintenance |
+| Query plane | `retrieval/`, `traces/` | routing, navigation, fetching, answering, tracing, post-hoc analysis |
+| Evaluation plane | `experiments/`, `experiments_app.py` | corpora, isolated builds, comparison runs, reports, golden datasets, evaluations |
 
-## High-Level Runtime Diagram
-
-```mermaid
-flowchart LR
-    User["User / API client / UI"] --> Interface["CLI / Streamlit / FastAPI"]
-    Interface --> Runtime["Runtime assembly<br/>index_registry.py"]
-    Runtime --> MasterTree["Master tree store"]
-    Runtime --> DocStore["Document store"]
-    Runtime --> TraceService["Trace service"]
-
-    Ingestion["Ingestion pipeline"] --> DocStore
-    Ingestion --> MasterTree
-
-    Query["Retrieval and answer pipeline"] --> MasterTree
-    Query --> DocStore
-    Query --> TraceService
-```
-
-## Main Ingestion Flow
+## Top-Level Flow
 
 ```mermaid
 flowchart TD
-    A["Uploaded or referenced file"] --> B["Validate doc_id and runtime inputs"]
-    B --> C{"File type"}
-    C -->|DOCX| D["Convert DOCX to derived markdown"]
-    C -->|PDF with contains_images| E["Extract images and analyze with vision model"]
-    C -->|PDF / Markdown| F["Use original or derived text path"]
-    D --> G["Build PageIndex tree"]
-    E --> H["Build enriched markdown with IMAGE_REF blocks"]
-    H --> G
-    F --> G
-    G --> I["Persist per-document tree and source path"]
-    I --> J["Generate master node"]
-    J --> K["Add node to project master tree"]
-    K --> L{"Relationship mode"}
-    L -->|off| M["Save master tree"]
-    L -->|basic or enhanced| N["Reconcile related_docs"]
-    N --> M
+    User["User or client"] --> Surface["Streamlit / CLI / FastAPI / React / Experiments UI"]
+    Surface --> Runtime["Runtime assembly"]
+
+    Runtime --> Knowledge["Project-scoped knowledge artifacts"]
+    Runtime --> Query["Query execution"]
+    Query --> Trace["Audit traces"]
+
+    Source["Source documents"] --> Ingest["Ingestion pipeline"]
+    Ingest --> Knowledge
+
+    Corpus["Experiment corpus"] --> Build["Experiment builds"]
+    Build --> Compare["Experiment comparison runs"]
+    Compare --> Eval["Experiment evaluations"]
 ```
 
-## Main Query Flow
+## Main Runtime Flow
 
 ```mermaid
 flowchart TD
-    A["User query"] --> B["Optional planner"]
-    B --> C["Router selects documents from master tree"]
-    C --> D{"Retrieval mode"}
-    D -->|hybrid| E["Navigator selects nodes"]
-    E --> F["Optional verifier"]
-    F --> G["Optional node expansion"]
-    G --> H["Fetcher reads raw content"]
-    H --> I["Answer LLM synthesizes response"]
-    D -->|pageindex| J["Agentic PageIndex tool loop"]
-    J --> I
-    I --> K["Emit QueryResult and async audit trace"]
+    A["Upload or reference a source file"] --> B["Ingestion pipeline"]
+    B --> C["Per-document PageIndex tree"]
+    B --> D["Master-tree document node"]
+    B --> E["Source-path registration"]
+    C --> F["Project index under data/indexes/{project}"]
+    D --> F
+    E --> F
+
+    G["User query"] --> H["Query engine"]
+    H --> I["Router selects documents from master tree"]
+    I --> J{"Retrieval mode"}
+    J -->|hybrid| K["Navigator -> verifier -> expansion -> fetcher"]
+    J -->|pageindex| L["Agentic PageIndex tool loop"]
+    K --> M["Answer generation"]
+    L --> M
+    M --> N["Query result"]
+    M --> O["Async audit trace"]
 ```
 
-## Artifact Taxonomy
+## Experiments Flow
 
-There are two different artifact systems in the repository.
+```mermaid
+flowchart TD
+    A["Register corpus"] --> B["Run build presets"]
+    B --> C["Select retrieval profiles"]
+    C --> D["Create comparison entries"]
+    D --> E{"Question source"}
+    E -->|single question| F["One comparison run"]
+    E -->|golden dataset batch| G["One run per suite case"]
+    F --> H["Persist run manifest + per-entry traces + reports"]
+    G --> H
+    H --> I["Evaluation snapshot"]
+    I --> J["Deterministic scores"]
+    I --> K["Optional LLM judge scores"]
+    J --> L["Evaluation reports and aggregates"]
+    K --> L
+```
 
-### Main runtime artifacts
+## The Most Important Architectural Distinctions
 
-- Namespace: `data/indexes/{project}/`
-- Primary artifact family: `pageindex_tree`
-- Core files:
-  - `master_tree.json`
-  - `doc_trees/{doc_id}_tree.json`
-  - `derived_markdown/{doc_id}.md`
-  - `images/{doc_id}/...`
-  - `doc_sources.json`
-  - `index_meta.json`
-
-### Experiments artifacts
-
-- Namespace: `experiments/artifacts/`
-- Artifact families:
-  - `rag_chunks`
-  - `rag_vector`
-  - `pageindex_tree`
-- Comparison runs and reports are stored separately from the main app.
-
-## The Important Distinctions
+These distinctions explain most of the confusion people have when reading the code for the first time.
 
 ### Project vs model
 
-- `project` selects the index namespace and therefore the visible document set.
-- `model` is a runtime parameter used for LLM calls.
-- Switching models does not create a new main-app index directory.
-
-### Build presets vs retrieval profiles
-
-- Build presets decide what artifacts are created.
-- Retrieval profiles decide how queries use those artifacts.
-- This matters most in the experiments harness, where `pageindex_*` build presets all create `pageindex_tree`, but `hybrid`, `pageindex`, `hybrid_advanced`, and `pageindex_advanced` change query behavior only.
-
-### `hybrid` vs `pageindex`
-
-- `hybrid` is the deterministic staged pipeline: route, navigate, verify, fetch, answer.
-- `pageindex` is the more agentic runtime: route into docs, then let the model inspect document structure and node content through tool calls.
-
-### Advanced retrieval
-
-Advanced retrieval is a policy overlay, not a storage format.
-
-It can add:
-
-- query planning
-- adaptive routing width
-- node-neighborhood expansion
-
-It does not add new persisted artifacts in the main runtime or the experiments harness.
-
-### Related-document metadata
-
-`related_docs` is maintained at ingestion time.
-
-- `off` keeps the original generated links with no reconciliation.
-- `basic` deterministically cleans and symmetrizes links.
-- `enhanced` computes a bounded candidate shortlist, asks an LLM to refine, then runs basic reconciliation.
-
-Query-time graph traversal over `related_docs` is explicitly noted as future work and is not implemented as a first-class runtime feature yet.
-
-### Image-enriched PDFs
-
-There is now a distinct PDF ingestion path when `contains_images=True`:
-
-- images are extracted from the PDF
-- each image is analyzed with a vision-capable model
-- the analysis is injected back into a derived markdown file as structured `IMAGE_REF` blocks
-- retrieval can then surface those references and the Streamlit UI can render the linked images
-
-This is not yet exposed by the CLI, FastAPI ingestion contract, or React ingestion form.
-
-## Repository Layout
-
-| Path | Role |
+| Axis | Meaning |
 | --- | --- |
-| `app.py` | Main Streamlit UI |
-| `cli.py` | Click-based command-line interface |
-| `api/` | FastAPI adapter and request contracts |
-| `frontend/` | Vite/React/TypeScript frontend |
-| `ingestion/` | Preprocessing, PageIndex calls, image enrichment |
-| `retrieval/` | Query routing, navigation, verification, fetching, answer orchestration |
-| `master_tree/` | Master-node schema, store, and relationship logic |
-| `storage/` | Document storage backends |
-| `traces/` | Trace schema, persistence, and analysis |
-| `experiments/` | Isolated builds, profiles, runs, reports, and evals |
-| `tests/` | Pytest suite documenting intended behavior |
+| `project` | selects the knowledge base and therefore the visible documents |
+| `model` | selects the LLM/deployment used for runtime calls |
 
-## Current Architectural Frictions
+Changing the model does not move you to a different index directory. Changing the project does.
 
-- Image-aware PDF ingestion assumes local-store image helpers and is not yet abstracted into the storage interface, so that path is not backend-neutral today.
-- The Streamlit UI exposes features that the FastAPI adapter and React frontend do not yet surface, especially `contains_images` and retrieved image rendering.
-- The React frontend intentionally remains a thin adapter and still lacks streaming answers and ingestion progress.
-- The experiments harness reuses core retrieval logic, but the PageIndex experiment profile is retrieval-only there so the shared answer layer remains aligned across variants.
+### Build preset vs retrieval profile
+
+| Axis | Meaning |
+| --- | --- |
+| build preset | determines what artifacts are created and persisted |
+| retrieval profile | determines how a query uses those artifacts |
+
+This distinction matters mostly in the experiments harness.
+
+Examples:
+
+- `pageindex_base`, `pageindex_related_basic`, and `pageindex_related_enhanced` are different build presets that all still create `pageindex_tree` artifacts.
+- `hybrid`, `pageindex`, `hybrid_advanced`, and `pageindex_advanced` are retrieval profiles that operate over those artifacts in different ways.
+
+### Hybrid vs PageIndex mode
+
+| Mode | What changes |
+| --- | --- |
+| `hybrid` | fixed staged retrieval path: route, navigate, verify, expand, fetch, answer |
+| `pageindex` | router still selects docs, but the model then uses tools to inspect selected docs iteratively |
+
+Both operate over the same main-runtime PageIndex artifacts.
+
+### Base vs advanced retrieval
+
+| Axis | What changes |
+| --- | --- |
+| base profile | use fixed query-time widths and no advanced planner overlay |
+| advanced profile | optionally plan the query, adapt retrieval width, and in hybrid mode expand nearby nodes |
+
+Advanced retrieval does not create a new tree format. It changes runtime policy only.
+
+### Main runtime vs experiments
+
+| System | Persistence root | Primary purpose |
+| --- | --- | --- |
+| main runtime | `data/` | answer real questions against the active project index |
+| experiments | `experiments/artifacts/` | compare artifact families and retrieval strategies under controlled conditions |
+
+## Artifact Families
+
+There are three named artifact families in the codebase.
+
+| Artifact family | Created by | Used by |
+| --- | --- | --- |
+| `pageindex_tree` | main ingestion pipeline and PageIndex experiment builds | hybrid retrieval, PageIndex retrieval |
+| `rag_chunks` | `rag_standard` experiment builds | lexical chunk retrieval baseline |
+| `rag_vector` | `rag_vector` experiment builds | local embedding retrieval, optional lexical fusion, optional reranking |
+
+## Main Runtime Artifact Layout
+
+```text
+data/
+  indexes/
+    {project}/
+      master_tree.json
+      index_meta.json
+      doc_sources.json
+      doc_trees/{doc_id}_tree.json
+      derived_markdown/{doc_id}.md
+      images/{doc_id}/...
+  uploads/
+  traces/{project}/
+  model_registry.json
+```
+
+## Experiments Artifact Layout
+
+```text
+experiments/artifacts/
+  corpora/{corpus_id}/
+  builds/{build_id}/
+  runs/{run_id}/
+  reports/{run_id}/
+  evals/runs/{eval_run_id}/
+  evals/suites/{suite_id}.json
+```
+
+## Capability Map By Interface
+
+This is one of the most important current-state tables in the repo.
+
+| Capability | Main Streamlit | CLI | FastAPI | React | Experiments UI |
+| --- | --- | --- | --- | --- | --- |
+| create/switch project | yes | yes | yes | yes | n/a |
+| ingest PDF/MD/DOCX | yes | yes | yes | yes | corpus upload only |
+| image-aware PDF ingestion | yes | no | no | no | no |
+| browse PageIndex tree | yes | indirect | yes | yes | yes, via build artifacts |
+| run hybrid queries | yes | yes | yes | yes | yes |
+| run PageIndex agentic queries | yes | yes | yes | yes | yes |
+| advanced retrieval toggles | yes | yes | yes | yes | yes |
+| trace browsing | yes | yes | yes | yes | run/eval traces only |
+| post-hoc trace analysis | yes | yes | yes | yes | n/a |
+| corpus/build/run evaluation lab | no | no | no | no | yes |
+
+## What A Query Can Actually Do
+
+At query time, the system can currently take these major paths.
+
+### Hybrid path
+
+Use when you want bounded, structured retrieval with strong traceability.
+
+Possible internal branches:
+
+1. optional planner
+2. strict router
+3. broadened router fallback if strict routing returns nothing
+4. navigator per selected doc
+5. top-section fallback if navigator returns nothing for a doc
+6. optional verifier
+7. optional node-neighborhood expansion
+8. fetch raw text under budget
+9. answer from retrieved context
+
+### PageIndex path
+
+Use when you want deeper, more exploratory document inspection.
+
+Possible internal branches:
+
+1. optional planner for routing width
+2. strict router
+3. broadened router fallback
+4. agentic tool loop over selected docs
+5. stop either because the model is satisfied, the tool budget is exhausted, or the content budget is exhausted
+
+## What Ingestion Can Actually Do
+
+At ingestion time, the system can currently take these major paths.
+
+### Standard path
+
+- validate input
+- optionally preprocess DOCX to markdown
+- run PageIndex
+- save tree
+- generate master node
+- optionally reconcile `related_docs`
+
+### Image-aware PDF path
+
+- validate input
+- extract PDF images
+- analyze images with a vision-capable model
+- weave analysis back into enriched markdown using `IMAGE_REF` blocks
+- run PageIndex on enriched markdown instead of the original PDF
+- save tree, image files, source-path metadata, and master node
+
+## Current Frictions And Mismatches
+
+These are not hypothetical. They are current code-level realities.
+
+### Interface parity is incomplete
+
+- The main Streamlit app exposes image-aware ingestion.
+- The CLI, FastAPI ingestion contract, and React ingestion form do not.
+
+### Some UI copy is ahead of backend behavior
+
+- The React Inspect page says project deletion removes traces.
+- `delete_project()` only deletes project index artifacts, not trace files.
+
+### The experiments harness intentionally reuses core logic but changes some semantics
+
+- In the main runtime, PageIndex mode can answer directly from the agentic loop.
+- In the experiments harness, PageIndex retrieval is used as a retrieval adapter and the final answer still goes through the shared answer layer so variant comparisons stay aligned.
+
+### Relationship maintenance is ingestion-time only today
+
+`related_docs` is built and reconciled at ingestion time, but there is not yet a first-class query-time graph traversal feature that actively walks those relationships.
+
+### PageIndex experiment builds are expensive by design
+
+If you run multiple `pageindex_*` build presets on the same corpus, the harness ingests every document once per preset. That is why the experiments UI can appear to “ingest the same files again”: it is building multiple isolated artifact variants.
+
+## Recommended Reading Order After This
+
+1. `modules/runtime-foundation.md`
+2. `modules/ingestion-pipeline.md`
+3. `modules/retrieval-and-answering.md`
+4. `modules/interfaces-and-operations.md`
+5. `modules/experiments-harness.md`

@@ -9,208 +9,77 @@ Primary code:
 - `retrieval/fetcher.py`
 - `retrieval/planner.py`
 - `retrieval/pageindex_engine.py`
+- `ingestion/pdf_enricher.py`
 
 ## Purpose
 
 This layer turns a user query plus a project index into:
 
-- routed documents
-- selected node references
-- fetched text context
+- selected documents
+- selected sections or nodes
+- fetched context
 - a final answer
-- metrics and trace data
+- source references
+- metrics
+- an audit trace
 
-## Retrieval Modes
+It is where the system’s “hybrid” and “pageindex” personalities diverge.
 
-The main runtime supports two retrieval modes.
+## The Two Main Retrieval Modes
 
 ### `hybrid`
 
-This is the deterministic staged pipeline:
+The deterministic staged pipeline.
+
+It uses a fixed sequence of components:
 
 1. optional planner
-2. router
-3. navigator
+2. document router
+3. per-document navigator
 4. optional verifier
-5. optional node expansion
+5. optional structural expansion
 6. fetcher
-7. answer model
+7. final answer generation
+
+This path is easier to reason about and easier to trace.
 
 ### `pageindex`
 
-This mode keeps the same document router, but after routing it switches to an agentic tool-use loop over the selected documents.
+The more agentic PageIndex loop.
 
-The model can ask for:
+It still starts with the same document router, but after routing it gives the model tools so it can inspect selected documents iteratively.
+
+The model can call:
 
 - `get_document_structure(doc_id)`
 - `get_node_content(doc_id, node_id)`
 
-It explores the selected docs under explicit tool-call and content-token budgets, then answers directly.
+This path is more exploratory and more variable in cost and latency.
 
-## Query Flow In Detail
+## Query Engine Inputs
 
-```mermaid
-flowchart TD
-    A["Query + conversation context"] --> B["Build AdvancedRetrievalConfig"]
-    B --> C["Optional plan_query()"]
-    C --> D["route_query() over master tree"]
-    D --> E{"Any docs selected?"}
-    E -->|No| F["route_query_broadened()"]
-    E -->|Yes| G{"Mode"}
-    F --> G
-    G -->|hybrid| H["navigate_doc_tree() per doc"]
-    H --> I["Fallback to stored top_sections if needed"]
-    I --> J["Optional verify_navigation_batch()"]
-    J --> K["Optional structural expansion"]
-    K --> L["fetch_multiple_nodes_detailed()"]
-    L --> M["_answer_query()"]
-    G -->|pageindex| N["run_pageindex_retrieval()"]
-    N --> M
-    M --> O["Build QueryResult, QueryTrace, QueryMetrics"]
-```
-
-## Query Inputs
-
-The orchestrator accepts:
+The main orchestrator accepts:
 
 - `user_query`
+- `master_tree_store`
+- `storage`
+- `model`
 - `conversation_context`
 - `max_docs`
-- `model`
 - `reasoning_effort`
+- `trace_service`
+- `project`
 - `advanced_retrieval`
 - `retrieval_mode`
-- optional answer token callback
-- optional trace service
+- optional token callback for streaming
 
-The query engine is async because it performs multiple model calls and async trace writes.
+The query engine is async because it may perform multiple model calls and writes traces asynchronously.
 
-## Router
+## Query Output Types
 
-The router operates on the master-tree LLM context only.
+The main public return type is `QueryResult`.
 
-It has two modes:
-
-- strict routing
-- broadened routing
-
-Broadened routing is a fallback when strict routing returns no relevant docs. The answer prompt is then told that routing was broadened so the answer can communicate best-effort uncertainty.
-
-## Planner And Advanced Retrieval
-
-Advanced retrieval is controlled by `AdvancedRetrievalConfig`.
-
-When enabled, it can apply three sub-features:
-
-- planning
-- adaptive width
-- node expansion
-
-### Planner
-
-`retrieval/planner.py` classifies the query into types such as:
-
-- fact lookup
-- compare
-- workflow or process
-- policy or compliance
-- troubleshooting
-- architecture or design
-
-The planner returns a `QueryPlan` that can recommend:
-
-- `recommended_max_docs`
-- `recommended_max_nodes`
-- whether expansion is useful
-- whether the query appears broad
-
-### Adaptive width
-
-Adaptive width converts planner recommendations into effective query-time widths while respecting caps from:
-
-- `max_docs_cap`
-- `max_nodes_cap`
-
-### Node expansion
-
-Node expansion adds bounded neighboring nodes around primary selections.
-
-This exists only in the hybrid staged pipeline. It is not the same as related-document graph traversal.
-
-## Navigator
-
-The navigator works inside a selected document tree and chooses node IDs likely to answer the question.
-
-Important properties:
-
-- per-document operation
-- summary-first selection
-- bounded node count
-- fallback to master-node `top_sections` when no strong navigation result is returned
-
-## Verifier
-
-The verifier is a best-effort self-correction pass.
-
-It runs one batched LLM call per document and asks whether each candidate section likely addresses the query.
-
-Failure behavior is intentionally conservative:
-
-- if the verifier call fails, keep the original picks
-- if it rejects every section in a document, keep the top original pick as a safety net
-
-This keeps verification from causing total recall collapse.
-
-## Fetcher
-
-The fetcher loads raw text from the retrieval-time source path and extracts the selected node ranges under a token budget.
-
-It preserves source metadata such as:
-
-- `doc_id`
-- `node_id`
-- title
-- page range
-
-It also prefixes chunk text with parent section context when available so the answer model gets more local structure.
-
-## Answer Synthesis
-
-After retrieval, the final answer LLM is called with:
-
-- a system prompt built from domain and routing context
-- the combined retrieved context
-- the user query and optional conversation history
-
-The system prompt can also signal conditions like:
-
-- truncated retrieval context
-- broadened routing fallback
-
-## PageIndex Agentic Engine
-
-`retrieval/pageindex_engine.py` wraps the more agentic query path.
-
-Current design:
-
-- router still preselects the candidate docs
-- agent can inspect doc structure and pull node content iteratively
-- explicit budgets prevent unconstrained tool churn
-- trace data records explored docs and budget exhaustion flags
-
-Tracked PageIndex metrics in `QueryTrace`:
-
-- tool calls made
-- tool call budget
-- content tokens used
-- content token budget
-- explored docs
-- tool budget exhausted flag
-- content budget exhausted flag
-
-## Query Outputs
-
-`QueryResult` includes:
+It includes:
 
 - `answer`
 - `selected_docs`
@@ -221,33 +90,279 @@ Tracked PageIndex metrics in `QueryTrace`:
 - `metrics`
 - `image_refs`
 
-### `image_refs`
+`image_refs` is especially important in the newer image-aware ingestion path. It is populated by parsing `IMAGE_REF` blocks found in retrieved context.
 
-This is new and comes from `ingestion/pdf_enricher.parse_image_refs()`.
+## Hybrid Flow In Detail
 
-If retrieved context contains `IMAGE_REF` blocks, the query engine surfaces them as structured metadata so the UI can render the referenced stored images.
+```mermaid
+flowchart TD
+    A["Query"] --> B["Optional plan_query()"]
+    B --> C["route_query() strict"]
+    C --> D{"Any docs?"}
+    D -->|no| E["route_query_broadened()"]
+    D -->|yes| F["navigate_doc_tree() per doc"]
+    E --> F
+    F --> G{"Navigator found nodes?"}
+    G -->|no for a doc| H["Fallback to master-node top_sections"]
+    G -->|yes| I["Optional verify_navigation_batch()"]
+    H --> I
+    I --> J["Optional collect_expansion_node_refs()"]
+    J --> K["fetch_multiple_nodes_detailed()"]
+    K --> L["Answer model"]
+    L --> M["QueryResult + trace + metrics"]
+```
 
-## Failure And Degradation Behavior
+### Router
 
-The retrieval layer has several deliberate degradation paths:
+The router operates only over the master-tree context. It does not see full document trees.
 
-- router broadening when strict routing is empty
-- navigator fallback to stored `top_sections`
-- verifier failure falling back to original navigation
-- planner disabled or unavailable without changing base behavior
-- PageIndex tool budgets capping exploration instead of allowing runaway loops
+There are two router variants:
 
-These are important to the system design because the repo prefers bounded incompleteness over hard failure in live query paths.
+- `route_query()` for strict routing
+- `route_query_broadened()` for best-effort fallback when strict routing finds nothing
 
-## Difference Between Main Runtime And Experiments
+Broadened routing is important because it changes the epistemic status of the answer. The system can still answer, but it should answer as “best effort from tangentially related material.”
 
-In the main runtime:
+### Navigator
 
-- `pageindex` answers directly from its agentic loop
+The navigator works within one selected document tree at a time.
 
-In the experiments harness:
+It receives:
 
-- PageIndex retrieval is typically used as a retrieval adapter
-- the final answer still goes through the shared aligned answer layer for fairness across variants
+- the user query
+- the flat readable representation of all nodes in that document
+- conversation context
+- reasoning effort
+- a max node count
 
-That difference is intentional and is described further in the experiments documentation.
+It returns `doc_id::node_id` refs, not raw content.
+
+### Top-section fallback
+
+If navigation returns nothing for a document, the system can fall back to the `top_sections` stored on that document’s master node.
+
+This is important because it prevents total retrieval failure when the navigator is indecisive but the ingestion-time summarizer had already identified strong sections.
+
+### Verifier
+
+The verifier is a best-effort correction step. It asks the model whether candidate sections really address the query.
+
+Important failure behavior:
+
+- if the verifier call fails, keep the original picks
+- if it rejects everything for a document, keep the first original pick as a safety net
+
+That design prefers graceful degradation over empty retrieval.
+
+### Expansion
+
+Expansion adds bounded structural neighbors around the primary node selection.
+
+It can include nearby nodes such as:
+
+- siblings
+- parent-adjacent context
+- first child context
+
+This is not graph traversal over `related_docs`. It is local structural expansion within the already selected document trees.
+
+### Fetcher
+
+The fetcher is the first stage that reads raw document content.
+
+It resolves each node ref into:
+
+- title
+- page range
+- extracted text
+- estimated tokens
+- truncation flags
+- expansion provenance
+
+It also optionally prepends parent-section context when a parent node has `prefix_summary`. This is a subtle but important feature because it prevents isolated child chunks from losing their framing.
+
+## PageIndex Agentic Flow In Detail
+
+```mermaid
+flowchart TD
+    A["Query"] --> B["Optional planning for routing width"]
+    B --> C["route_query() strict"]
+    C --> D{"Any docs?"}
+    D -->|no| E["route_query_broadened()"]
+    D -->|yes| F["Tool loop over selected docs"]
+    E --> F
+    F --> G["get_document_structure(doc_id)"]
+    F --> H["get_node_content(doc_id,node_id)"]
+    G --> F
+    H --> F
+    F --> I{"Stop condition"}
+    I -->|answer ready| J["Return answer and accessed context"]
+    I -->|tool budget hit| J
+    I -->|content budget hit| J
+```
+
+### Tool set
+
+The agent sees two tools only:
+
+- document structure inspection
+- node-content retrieval
+
+This is deliberate. The system keeps the agent’s action space narrow and document-focused.
+
+### Budgets
+
+The PageIndex engine tracks:
+
+- tool calls made
+- tool call budget
+- content tokens used
+- content token budget
+- explored docs
+- budget exhaustion flags
+
+These metrics are fed back into the `QueryTrace` so operators can see whether the agent was productive or simply ran out of budget.
+
+### Main-runtime answer semantics
+
+In the main runtime, PageIndex mode can answer directly from the agentic loop.
+
+That is different from the experiments harness, where the PageIndex retrieval adapter can be used in retrieval-only mode and the shared answer layer then generates the final answer so comparisons stay aligned.
+
+## Advanced Retrieval
+
+Advanced retrieval is controlled by `AdvancedRetrievalConfig`.
+
+It has:
+
+- an overall `enabled` flag
+- planning toggle
+- adaptive-width toggle
+- node-expansion toggle
+- `max_docs_cap`
+- `max_nodes_cap`
+
+### Planning
+
+The planner classifies the query and recommends retrieval width.
+
+Typical planner outputs include:
+
+- query type
+- recommended max docs
+- recommended max nodes
+- whether node expansion is useful
+
+### Adaptive width
+
+Adaptive width turns the planner’s recommendations into the actual effective widths for the current query, but never beyond the configured caps.
+
+### Important difference between hybrid and PageIndex advanced modes
+
+- `hybrid_advanced` can use node expansion
+- `pageindex_advanced` uses planning and adaptive document width, but its adapter explicitly disables node expansion because the PageIndex loop explores content through tools instead
+
+This distinction is easy to miss and matters when comparing profiles.
+
+## Source References
+
+The query layer emits structured source references that include:
+
+- `node_ref`
+- `doc_id`
+- section title
+- page range
+
+These are returned to callers and also used in experiment traces and evaluations.
+
+## Image Reference Handling
+
+When retrieved context contains `IMAGE_REF` blocks, the query engine parses them and exposes them in `QueryResult.image_refs`.
+
+Current interface reality:
+
+- the main Streamlit app can render those image refs inline with the answer
+- the React frontend does not currently model or display them
+- the API returns the full query payload, but the React type surface still lags this field
+
+## Trace And Metrics Behavior
+
+The query engine also builds:
+
+- `QueryTrace`
+- `QueryMetrics`
+
+These capture:
+
+- routed docs
+- navigation choices
+- fetched chunks
+- truncation and budget info
+- advanced-retrieval metadata
+- PageIndex agentic exploration metrics
+- latency and token usage
+
+If a `TraceService` is provided, the engine writes an `AuditTrace` asynchronously after the answer is ready.
+
+## Flow Guide
+
+### Flow: direct fact lookup
+
+Likely path:
+
+1. strict routing finds one or two documents
+2. navigator selects a small number of nodes
+3. fetcher reads tight chunks
+4. answer is fast and bounded
+
+This is where `hybrid` usually shines.
+
+### Flow: broad workflow question
+
+Likely path:
+
+1. planner recommends wider retrieval
+2. adaptive width raises doc and node limits
+3. hybrid may also use node expansion
+4. answer trades latency for better completeness
+
+### Flow: hard multi-document reasoning
+
+Possible strategies:
+
+- `hybrid_advanced` for bounded but wider retrieval
+- `pageindex` or `pageindex_advanced` when you want iterative inspection over the selected docs
+
+### Flow: no strong direct match
+
+Likely path:
+
+1. strict routing returns nothing
+2. broadened router returns tangential docs
+3. answer should be treated as best effort rather than authoritative
+
+### Flow: image-backed answer
+
+1. prior ingestion must have used the image-aware PDF branch
+2. fetcher retrieves enriched markdown containing `IMAGE_REF`
+3. query engine parses image refs
+4. main Streamlit UI renders answer text and linked images together
+
+## What Is Possible In This Module
+
+This layer can currently:
+
+- route queries at the document level
+- navigate within document trees
+- verify or widen navigation results
+- fetch raw content across PDFs, markdown, and DOCX-derived content
+- run an agentic tool loop over selected docs
+- expose structured sources and metrics
+- parse and surface image references from enriched retrieval context
+
+## Current Constraints
+
+- PageIndex traces do not expose the same section-level `sections_used` richness as hybrid traces.
+- Advanced node expansion is a hybrid-only concept today.
+- Broadened routing can preserve recall, but it weakens answer authority and must be interpreted that way.
+- The React frontend still lags the backend on `image_refs`.

@@ -3,207 +3,324 @@
 Primary code:
 
 - `ingestion/ingest.py`
+- `ingestion/docx_converter.py`
+- `ingestion/master_node_gen.py`
 - `ingestion/image_extractor.py`
 - `ingestion/image_analyzer.py`
 - `ingestion/pdf_enricher.py`
-- `master_tree/generator.py`
 - `master_tree/relationships.py`
+- `storage/store.py`
 
 ## Purpose
 
-The ingestion pipeline turns one source document into:
+The ingestion pipeline turns one source document into the set of artifacts the query system can use later.
+
+For the main runtime, one successful ingestion can produce:
 
 - a per-document PageIndex tree
-- a master-tree routing node
-- a source-path record
+- a master-tree document node
+- a source-path registration entry
 - optional derived markdown
-- optional extracted image artifacts
-- an ingestion trace
+- optional stored image files
+- an ingestion trace with step-level detail
+
+In the experiments harness, the same ingestion logic is reused inside the PageIndex build adapter so experiment builds stay behaviorally aligned with the main runtime.
 
 ## Supported Inputs
 
-The current ingestion entrypoints accept:
+The accepted file extensions are:
 
-- PDF
-- Markdown
+- `.pdf`
 - `.md`
 - `.markdown`
-- DOCX
+- `.docx`
 
-The main async entrypoints are:
+That support is validated in `ingestion/ingest.py`.
+
+## Main Entry Points
+
+There are two async entry points:
 
 - `ingest_document()`
 - `ingest_document_with_trace()`
 
-Both now accept `contains_images: bool = False`.
+Both share the same implementation. The only difference is the return shape:
 
-## End-To-End Flow
+- `ingest_document()` returns only the `MasterNode`
+- `ingest_document_with_trace()` returns `IngestionResult`, which includes the master node, the per-document tree, and the ingestion trace
 
-1. Validate `doc_id`, file path, and runtime inputs.
-2. Resolve ingestion-time defaults such as `top_sections_target` and `relationship_mode`.
-3. Preprocess the source:
-   - DOCX becomes derived markdown.
-   - PDF can optionally go through image extraction and enrichment.
-4. Build a PageIndex tree from the resolved retrieval path.
-5. Persist the per-document tree.
-6. Register the source path and retrieval path.
-7. Generate the master node from the tree.
-8. Add the node to the master tree.
-9. Reconcile `related_docs` if relationship maintenance is enabled.
-10. Save the master tree and return ingestion outputs plus trace data.
+## High-Level Flow
+
+```mermaid
+flowchart TD
+    A["Validate input and resolve defaults"] --> B{"Source type"}
+    B -->|DOCX| C["Convert DOCX to derived markdown"]
+    B -->|PDF with contains_images| D["Extract images and build enriched markdown"]
+    B -->|PDF / MD / MARKDOWN| E["Use source directly"]
+    C --> F["Run PageIndex"]
+    D --> F
+    E --> F
+    F --> G["Save per-document tree"]
+    G --> H["Register source path and retrieval path"]
+    H --> I["Generate master node"]
+    I --> J["Upsert master tree"]
+    J --> K{"Relationship mode"}
+    K -->|off| L["Save"]
+    K -->|basic| M["Deterministic reconciliation"]
+    K -->|enhanced| N["Candidate shortlist + LLM refinement + basic cleanup"]
+    M --> L
+    N --> L
+```
+
+## Step-By-Step Execution
+
+### 1. Validate input and resolve runtime defaults
+
+The ingestion implementation resolves:
+
+- `model`
+- `top_sections_target`
+- `relationship_mode`
+- supported extension
+- absolute source path
+
+The trace records these resolved values up front so operators can later see which defaults were actually applied.
+
+### 2. Preprocess the source when necessary
+
+This step is branch-dependent.
+
+#### Markdown input
+
+Plain markdown is already in the format the markdown PageIndex entrypoint can consume, so it usually flows straight through.
+
+#### DOCX input
+
+DOCX is converted to derived markdown with `docx_to_markdown()`.
+
+That conversion is important for two reasons:
+
+1. PageIndex’s markdown entrypoint is used rather than trying to parse DOCX directly.
+2. Later query-time fetches can read the derived markdown rather than repeatedly re-converting the DOCX.
+
+The derived markdown path becomes the retrieval path, while the original DOCX path is still preserved as the source path.
+
+#### Standard PDF input
+
+If `contains_images=False`, the PDF goes through the normal PageIndex PDF path.
+
+#### Image-aware PDF input
+
+If `contains_images=True` and the file is a PDF, ingestion takes a different branch before PageIndex runs.
+
+That branch:
+
+1. extracts content-bearing images from the PDF
+2. analyzes those images with a vision-capable model
+3. stores the original image files
+4. rebuilds the document as enriched markdown with `IMAGE_REF` blocks
+5. sends that enriched markdown into PageIndex
+
+This is the only path that makes image content available later during retrieval.
 
 ## PageIndex Boundary
 
-The repo does not hard-wire PageIndex imports at module load time.
+PageIndex is loaded lazily, not imported eagerly at module load time.
 
-Instead, `ingestion/ingest.py` uses a lazy dependency loader that:
+That loader:
 
-- imports vendor PageIndex modules only when needed
-- patches PageIndex LLM helpers to use the repo's configured clients
-- patches PageIndex progress hooks so ingestion progress can be surfaced in the UI
+- searches for the local PageIndex checkout
+- patches PageIndex helper functions to use this repo’s client setup
+- patches PageIndex progress hooks so the app can show ingestion progress
+- supports both PDF and markdown entrypoints
 
-### Tree builders used
+The practical effect is that the repo keeps PageIndex integration logic on its side of the boundary rather than editing vendor code directly.
 
-- PDFs go through PageIndex's `page_index_main`
-- markdown-derived sources go through `md_to_tree`
+## PageIndex Execution Paths
 
-## DOCX Path
+### PDF path
 
-DOCX files are converted to markdown before tree construction.
+PDF ingestion goes through `page_index_main()`.
 
-That derived markdown is stored under the project index and becomes the retrieval-time source path. The original DOCX path is still retained in source metadata.
+### Markdown path
 
-## Image-Enriched PDF Path
+Markdown and markdown-derived sources go through `md_to_tree()`.
 
-This is the newest ingestion branch in the codebase.
+The code adapts one shared config object into the slightly different entrypoint signatures for those two upstream functions.
 
-It is activated only when both conditions are true:
+## Persisted Outputs
 
-- the source is a PDF
-- `contains_images=True`
+After PageIndex returns a tree, ingestion persists:
 
-### Step 1: image extraction
+- the tree JSON under `doc_trees/`
+- the source-path registration in `doc_sources.json`
+- any derived markdown under `derived_markdown/`
+- any extracted images under `images/{doc_id}/`
 
-`ingestion/image_extractor.py` uses PyMuPDF (`fitz`) to pull embedded images from the PDF.
+The stored source-path record distinguishes:
 
-Current behavior:
+- `source_path`
+- `retrieval_path`
 
-- each extracted image gets an `img_id`
-- page number, MIME type, width, and height are preserved
-- images smaller than 80px in either dimension are skipped
+That distinction is subtle but critical. Query-time fetchers read the retrieval path, not always the original file.
 
-### Step 2: image analysis
+Examples:
 
-`ingestion/image_analyzer.py` sends one image at a time to a vision-capable chat completion call.
+- DOCX source, markdown retrieval path
+- PDF source, enriched markdown retrieval path when image analysis is enabled
 
-The analyzer asks for:
+## Master Node Generation
 
-- image type classification
-- a plain-language description
-- structured content extraction
-- extracted text where present
+Once the per-document tree exists, ingestion calls `generate_master_node()`.
 
-Current image types:
+This step summarizes the document into the cross-document routing format used by the master tree.
 
-- `table`
-- `flowchart`
-- `architecture_diagram`
-- `chart`
-- `screenshot`
-- `photograph`
-- `equation`
-- `other`
+The generated node includes:
 
-### Step 3: enriched markdown generation
+- document summary
+- key topics
+- relevance hints
+- selected top sections
+- optional routing facets
+- initial `related_docs`
 
-`ingestion/pdf_enricher.py` rebuilds the PDF as page-wise markdown text and inserts structured `IMAGE_REF` blocks that point to stored image files plus the model-generated analysis.
-
-That enriched markdown becomes the retrieval path used by PageIndex for the rest of ingestion.
-
-### Step 4: image persistence
-
-The local document store writes extracted images under the project's `images/` directory.
-
-These stored paths are then referenced by the `IMAGE_REF` blocks so later query results can map retrieved content back to image files.
-
-### Query-time effect
-
-If retrieved context contains `IMAGE_REF` blocks, `retrieval/query_engine.py` parses them into `QueryResult.image_refs`.
-
-The legacy Streamlit UI then renders the linked images directly in chat.
-
-## Ingestion Trace
-
-`ingest_document_with_trace()` returns an `IngestionResult` with:
-
-- `master_node`
-- `per_doc_tree`
-- `trace`
-
-The trace contains:
-
-- input file path and type
-- tree output path
-- high-level ingestion steps
-- relationship mode
-- optional relationship reconciliation details
-
-Progress callbacks can also receive event dictionaries while ingestion is running.
-
-## Default PageIndex Build Options
-
-The human reference in `config.yaml` documents the hard-coded PageIndex defaults used during ingestion:
-
-- add node IDs
-- add node summaries
-- do not add doc descriptions
-- max pages per node: `10`
-- max tokens per node: `20000`
-
-Those can still be overridden when calling ingestion directly with `pageindex_opts`.
-
-## Outputs Written By Ingestion
-
-| Output | Written by | Notes |
-| --- | --- | --- |
-| Per-document tree JSON | `storage.save_doc_tree()` | Canonical retrieval structure |
-| Source registry entry | `storage.register_doc_source()` | Tracks original and retrieval-time path |
-| Derived markdown | `storage.save_derived_markdown()` | Used for DOCX and image-enriched PDF paths |
-| Extracted images | `storage.save_image()` | Local-store-only today |
-| Master node | `master_tree_store.add_node()` | Routing metadata for the whole project |
+That master node is the router-facing abstraction of the document. Query routing quality depends heavily on the quality of this step.
 
 ## Relationship Maintenance
 
-After the new master node is generated, ingestion can optionally reconcile `related_docs`.
+After the new master node is added, ingestion may run relationship reconciliation.
 
-Modes:
+### `off`
 
-- `off`
-- `basic`
-- `enhanced`
+Do not reconcile anything after master-node generation.
 
-The detailed logic is documented in `master-tree-and-relationships.md`.
+### `basic`
 
-## Interface Surface Differences
+Run deterministic cleanup and symmetry over the local neighborhood of the new document.
 
-The code paths are not surfaced equally across interfaces.
+### `enhanced`
 
-### Exposed today
+First shortlist candidate neighbors from deterministic metadata overlap, then ask an LLM to refine the new document’s related set, then run basic cleanup for symmetry and bounds.
 
-- Streamlit main app: yes, includes the `contains_images` checkbox for PDFs
-- direct Python call: yes, via `contains_images` parameter
+The relationship result is embedded into the ingestion trace when reconciliation runs.
 
-### Not exposed today
+## Image-Aware PDF Branch In Detail
 
-- CLI: no explicit `--contains-images` flag
-- FastAPI ingestion contract: no `contains_images` form field
-- React ingestion UI: no image-aware ingestion control
+This is the newest and most nuanced ingestion path in the repo.
 
-That means the backend capability exists, but only the Streamlit UI currently exposes it end to end.
+### What qualifies
 
-## Important Constraints
+- file must be a PDF
+- caller must explicitly pass `contains_images=True`
 
-- The image-aware path currently depends on local image storage helpers and is not fully abstracted behind `AbstractDocumentStore`.
-- The PageIndex dependency is still vendor code, so the repo patches it at runtime rather than owning all of the lower-level tree-building logic.
-- Relationship enrichment can add extra LLM cost at ingestion time.
-- Enriched PDFs improve diagram/chart retrievability, but they add ingestion latency and extra model calls.
+### What `doc_type` means in this path
+
+`doc_type` is not a parser selector. It is free-form semantic context passed into the image-analysis prompt. Values such as `technical_spec`, `playbook`, or `architecture_overview` are all acceptable.
+
+### What gets extracted
+
+The image extraction module preserves:
+
+- image ID
+- page number
+- MIME type
+- width and height
+
+Small, non-meaningful images are filtered out before analysis.
+
+### What gets analyzed
+
+The analyzer asks for structured image understanding such as:
+
+- image type
+- plain-language description
+- extracted text when present
+- content explanation
+
+### What gets persisted
+
+- original image bytes on disk
+- enriched markdown containing `IMAGE_REF` blocks that point back to those images
+
+### Why this matters later
+
+At query time, retrieved context can include those `IMAGE_REF` blocks. The main Streamlit app can then render both the answer text and the linked image artifacts together.
+
+## Progress And Trace Semantics
+
+Ingestion emits both:
+
+- structured progress events for live UI updates
+- a durable step-by-step ingestion trace in the returned result
+
+Progress events include milestones such as:
+
+- ingestion step updates
+- image analysis start
+- PageIndex start
+- master-node generation start
+- ingestion complete
+
+The trace captures the same run in a more durable debugging-oriented format.
+
+## Flow Guide
+
+### Flow: ingest a markdown file
+
+1. validate extension
+2. run PageIndex markdown ingestion
+3. save tree and source path
+4. generate master node
+5. optionally reconcile relationships
+
+### Flow: ingest a DOCX file
+
+1. convert DOCX to markdown
+2. save derived markdown
+3. run PageIndex markdown ingestion on the derived file
+4. register original source path and markdown retrieval path
+5. generate master node and optionally reconcile relationships
+
+### Flow: ingest a standard PDF
+
+1. validate PDF
+2. run PageIndex PDF ingestion
+3. save tree and source path
+4. generate master node and optionally reconcile relationships
+
+### Flow: ingest an image-heavy PDF
+
+1. extract images
+2. analyze images
+3. store images
+4. build enriched markdown with `IMAGE_REF`
+5. run PageIndex on enriched markdown
+6. register original PDF as source path and enriched markdown as retrieval path
+7. generate master node and optionally reconcile relationships
+
+### Flow: run PageIndex builds in experiments
+
+1. experiments build adapter loops over corpus documents
+2. each document calls `ingest_document_with_trace()`
+3. resulting trees, master tree, and ingestion traces are stored under the isolated build directory
+
+This is why experiments PageIndex builds behave like repeated ingestion passes over the corpus.
+
+## What Is Possible In This Module
+
+This module can currently:
+
+- ingest PDF, markdown, and DOCX inputs
+- preserve source-vs-retrieval path distinctions
+- build PageIndex trees lazily through the vendor boundary
+- generate router-facing master nodes
+- maintain `related_docs` deterministically or with a bounded LLM assist
+- enrich PDFs with image analysis before indexing
+- emit progress callbacks and rich traces
+
+## Current Constraints
+
+- Image-aware ingestion is PDF-only.
+- The image-aware branch is surfaced in the main Streamlit app but not in the CLI, FastAPI ingestion contract, or React ingest form.
+- The storage abstraction does not yet expose image helpers as backend-neutral interface methods.
+- Experiments PageIndex presets currently re-run ingestion once per selected preset rather than reusing a shared base tree and re-materializing only relationship variants.

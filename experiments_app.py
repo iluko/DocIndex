@@ -225,6 +225,23 @@ def _inject_styles() -> None:
           box-shadow: 0 16px 36px rgba(23, 48, 66, 0.04);
         }
 
+        /* ── st.metric — force ink color so numbers aren't white ─────── */
+        [data-testid="stMetricValue"],
+        [data-testid="stMetricValue"] > div {
+          color: var(--ink) !important;
+          font-weight: 700 !important;
+        }
+        [data-testid="stMetricLabel"],
+        [data-testid="stMetricLabel"] > div {
+          color: var(--muted) !important;
+          font-size: 0.78rem !important;
+          text-transform: uppercase !important;
+          letter-spacing: 0.08em !important;
+        }
+        [data-testid="stMetricDelta"] {
+          color: var(--muted) !important;
+        }
+
         .small-note {
           color: var(--muted);
           font-size: 0.9rem;
@@ -637,6 +654,44 @@ def _sort_frame(
     return df.sort_values(by=by, ascending=ascending)
 
 
+def _configured_chart(chart):
+    """Apply a consistent light theme to any Altair chart before rendering."""
+    return (
+        chart
+        .configure(
+            background="transparent",
+            font="'Avenir Next', 'Segoe UI', sans-serif",
+            padding={"top": 5, "bottom": 72, "left": 5, "right": 5},
+        )
+        .configure_axis(
+            labelColor="#173042",
+            titleColor="#5f6f79",
+            gridColor="rgba(215, 203, 185, 0.45)",
+            domainColor="rgba(215, 203, 185, 0.8)",
+            tickColor="rgba(215, 203, 185, 0.8)",
+            labelFontSize=11,
+            titleFontSize=12,
+        )
+        .configure_legend(
+            labelColor="#173042",
+            titleColor="#5f6f79",
+            labelFontSize=11,
+            titleFontSize=11,
+            fillColor="rgba(252, 250, 245, 0.9)",
+            strokeColor="rgba(215, 203, 185, 0.7)",
+            padding=8,
+            cornerRadius=8,
+        )
+        .configure_title(
+            color="#173042",
+            fontSize=13,
+            fontWeight=700,
+            anchor="start",
+        )
+        .configure_view(stroke="transparent")
+    )
+
+
 def _render_bar_chart(
     df: pd.DataFrame,
     *,
@@ -652,7 +707,12 @@ def _render_bar_chart(
         alt.Chart(df)
         .mark_bar(cornerRadiusTopLeft=6, cornerRadiusTopRight=6)
         .encode(
-            x=alt.X(f"{x}:N", sort=sort, title=x.replace("_", " ").title()),
+            x=alt.X(
+                f"{x}:N",
+                sort=sort,
+                title=None,
+                axis=alt.Axis(labelAngle=-45, labelLimit=140, labelPadding=6),
+            ),
             y=alt.Y(f"{y}:Q", title=y.replace("_", " ").title()),
             color=(
                 alt.Color(f"{color}:N", title=color.replace("_", " ").title())
@@ -661,9 +721,9 @@ def _render_bar_chart(
             ),
             tooltip=list(df.columns),
         )
-        .properties(height=320, title=title)
+        .properties(height=300, title=title)
     )
-    st.altair_chart(chart, use_container_width=True)
+    st.altair_chart(_configured_chart(chart), use_container_width=True)
 
 
 def _render_scatter_chart(
@@ -689,9 +749,9 @@ def _render_scatter_chart(
             ),
             tooltip=list(df.columns),
         )
-        .properties(height=320, title=title)
+        .properties(height=300, title=title)
     )
-    st.altair_chart(chart, use_container_width=True)
+    st.altair_chart(_configured_chart(chart), use_container_width=True)
 
 
 def _render_heatmap(
@@ -713,10 +773,13 @@ def _render_heatmap(
         tooltip=list(df.columns),
     )
     text = base.mark_text(baseline="middle").encode(
-        text=alt.Text(f"{color}:Q", format=".2f"),
+        text=alt.Text(f"{color}:Q", format=".1f"),
         color=alt.value("#173042"),
     )
-    st.altair_chart((heatmap + text).properties(height=320, title=title), use_container_width=True)
+    st.altair_chart(
+        _configured_chart((heatmap + text).properties(height=300, title=title)),
+        use_container_width=True,
+    )
 
 
 def _safe_read_json(path: str | None) -> dict:
@@ -1325,10 +1388,11 @@ def _render_builds_tab(store: CorpusStore, build_runner: ArtifactBuildRunner) ->
 
 
 def _run_label(run: ComparisonRunManifest) -> str:
+    short_id = run.run_id[:8]
     suffixes = [value for value in [run.case_id, run.suite_id] if value]
     if not suffixes:
-        return f"{run.run_id} · {run.title}"
-    return f"{run.run_id} · {run.title} · {' / '.join(suffixes)}"
+        return f"{short_id}… · {run.title}"
+    return f"{short_id}… · {run.title} · {' / '.join(suffixes)}"
 
 
 def _attached_suite_id_for_runs(
@@ -2018,8 +2082,10 @@ def _evaluation_entries_frame(evaluation) -> pd.DataFrame:
     for entry in evaluation.entries:
         scorecard = entry.scorecard
         judge = entry.judge_scorecard
+        q = (entry.question or "").strip()
         rows.append(
             {
+                "question": q,
                 "source_run_id": entry.source_run_id,
                 "case_id": entry.case_id,
                 "question_type": entry.question_type,
@@ -2036,6 +2102,10 @@ def _evaluation_entries_frame(evaluation) -> pd.DataFrame:
                 "judge_score": judge.overall_quality_score if judge else None,
                 "business_score": judge.business_quality_score if judge else None,
                 "groundedness_score": judge.groundedness_score if judge else None,
+                "completeness_score": judge.completeness_score if judge else None,
+                "directness_score": judge.directness_score if judge else None,
+                "actionability_score": judge.actionability_score if judge else None,
+                "abstention_quality_score": judge.abstention_quality_score if judge else None,
                 "gold_alignment_score": judge.gold_alignment_score if judge else None,
                 "source_match_score": judge.source_match_score if judge else None,
                 "efficiency_score": scorecard.efficiency_score if scorecard else None,
@@ -2056,6 +2126,79 @@ def _evaluation_entries_frame(evaluation) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+def _compute_profile_recommendation(profile_df: pd.DataFrame) -> dict | None:
+    """Return speed / quality / cost recommended profile IDs based on pareto logic."""
+    if profile_df.empty:
+        return None
+    df = profile_df.copy()
+    has_judge = df["avg_judge_score"].fillna(0).sum() > 0
+    quality_col = "avg_judge_score" if has_judge else "avg_technical_score"
+    max_quality = df[quality_col].max()
+    # Candidates within 15 % of the best quality score
+    threshold = max_quality * 0.85 if max_quality > 0 else 0
+    candidates = df[df[quality_col] >= threshold] if threshold > 0 else df
+    speed_best = candidates.loc[
+        candidates["avg_total_time_seconds"].idxmin(), "retrieval_profile_id"
+    ] if not candidates.empty else None
+    cost_best = candidates.loc[
+        candidates["avg_total_tokens"].idxmin(), "retrieval_profile_id"
+    ] if not candidates.empty else None
+    quality_best = df.loc[df[quality_col].idxmax(), "retrieval_profile_id"]
+    # Balanced: best score-per-token ratio (avoid div-by-zero)
+    df["_score_per_1k_tokens"] = df[quality_col] / (df["avg_total_tokens"] / 1000.0 + 1.0)
+    balanced_best = df.loc[df["_score_per_1k_tokens"].idxmax(), "retrieval_profile_id"]
+    return {
+        "speed": speed_best,
+        "quality": quality_best,
+        "cost": cost_best,
+        "balanced": balanced_best,
+        "quality_col": quality_col,
+    }
+
+
+def _aggregate_failure_modes(evaluation) -> tuple[list[tuple[str, int]], list[tuple[str, int]]]:
+    """Return top missing-fact strings and top risk strings across all judged entries."""
+    missing_counter: dict[str, int] = {}
+    risk_counter: dict[str, int] = {}
+    for entry in evaluation.entries:
+        judge = entry.judge_scorecard
+        if not judge:
+            continue
+        for fact in judge.missing_required_facts or []:
+            fact = fact.strip()
+            if fact:
+                missing_counter[fact] = missing_counter.get(fact, 0) + 1
+        for risk in judge.risks or []:
+            risk = risk.strip()
+            if risk:
+                risk_counter[risk] = risk_counter.get(risk, 0) + 1
+    top_missing = sorted(missing_counter.items(), key=lambda x: x[1], reverse=True)[:10]
+    top_risks = sorted(risk_counter.items(), key=lambda x: x[1], reverse=True)[:10]
+    return top_missing, top_risks
+
+
+def _judge_subscores_by_profile(entries_df: pd.DataFrame) -> pd.DataFrame:
+    """Aggregate judge sub-scores from the entry-level frame grouped by retrieval profile."""
+    sub_cols = [
+        "groundedness_score",
+        "completeness_score",
+        "directness_score",
+        "actionability_score",
+        "abstention_quality_score",
+    ]
+    available = [c for c in sub_cols if c in entries_df.columns]
+    if not available or "retrieval_profile_id" not in entries_df.columns:
+        return pd.DataFrame()
+    judged = entries_df[entries_df[available].notna().any(axis=1)]
+    if judged.empty:
+        return pd.DataFrame()
+    agg = judged.groupby("retrieval_profile_id")[available].mean().round(1).reset_index()
+    agg.columns = ["retrieval_profile_id"] + [
+        c.replace("_score", "").replace("_", " ").title() for c in available
+    ]
+    return agg
+
+
 def _evaluation_suite_rows_frame(suites) -> pd.DataFrame:
     rows = []
     for suite in suites:
@@ -2070,6 +2213,153 @@ def _evaluation_suite_rows_frame(suites) -> pd.DataFrame:
             }
         )
     return pd.DataFrame(rows)
+
+
+def _routing_strategy_from_entries(entries_df: pd.DataFrame) -> pd.DataFrame:
+    """For each question type, identify the best retrieval profile and score gap."""
+    has_judge = entries_df["judge_score"].notna().any() if "judge_score" in entries_df.columns else False
+    score_col = "judge_score" if has_judge else "technical_score"
+    if score_col not in entries_df.columns or "retrieval_profile_id" not in entries_df.columns:
+        return pd.DataFrame()
+    completed = entries_df[entries_df["status"] == "completed"] if "status" in entries_df.columns else entries_df
+    if completed.empty:
+        return pd.DataFrame()
+    grouped = (
+        completed.dropna(subset=[score_col])
+        .groupby(["question_type", "retrieval_profile_id"])[score_col]
+        .agg(["mean", "count"])
+        .reset_index()
+    )
+    grouped.columns = ["question_type", "retrieval_profile_id", "avg_score", "n_entries"]
+    rows = []
+    for qtype in sorted(grouped["question_type"].unique()):
+        subset = grouped[grouped["question_type"] == qtype].sort_values("avg_score", ascending=False)
+        if subset.empty:
+            continue
+        best = subset.iloc[0]
+        score_gap = round(best["avg_score"] - subset.iloc[1]["avg_score"], 1) if len(subset) > 1 else None
+        rows.append({
+            "question_type": qtype,
+            "recommended_profile": best["retrieval_profile_id"],
+            f"avg_{score_col}": round(best["avg_score"], 1),
+            "n_entries": int(best["n_entries"]),
+            "score_gap_vs_2nd": score_gap if score_gap is not None else "—",
+            "confidence": "high" if best["n_entries"] >= 5 else "medium" if best["n_entries"] >= 3 else "low",
+        })
+    return pd.DataFrame(rows)
+
+
+def _routing_config_json(routing_df: pd.DataFrame) -> str:
+    config: dict[str, str] = {}
+    for _, row in routing_df.iterrows():
+        config[str(row["question_type"])] = str(row["recommended_profile"])
+    return json.dumps(
+        {
+            "routing_strategy": config,
+            "_note": (
+                "Generated from evaluation data. "
+                "Low-confidence entries have fewer than 3 samples — run more comparisons before trusting them."
+            ),
+        },
+        indent=2,
+        ensure_ascii=False,
+    )
+
+
+def _snapshot_comparison_frame(eval_a, eval_b) -> pd.DataFrame:
+    """Return a per-profile delta table comparing two evaluation snapshots."""
+    profiles_a = pd.DataFrame(eval_a.aggregate_payload.get("profiles", []))
+    profiles_b = pd.DataFrame(eval_b.aggregate_payload.get("profiles", []))
+    if profiles_a.empty or profiles_b.empty:
+        return pd.DataFrame()
+    score_cols = [
+        "avg_technical_score",
+        "avg_judge_score",
+        "avg_business_score",
+        "avg_groundedness_score",
+        "avg_gold_alignment_score",
+        "avg_total_time_seconds",
+        "avg_total_tokens",
+        "missing_required_fact_rate",
+        "forbidden_claim_violation_rate",
+    ]
+    cols_a = [c for c in score_cols if c in profiles_a.columns]
+    cols_b = [c for c in score_cols if c in profiles_b.columns]
+    shared_cols = [c for c in cols_a if c in cols_b]
+    if not shared_cols:
+        return pd.DataFrame()
+    merged = profiles_a[["retrieval_profile_id"] + shared_cols].merge(
+        profiles_b[["retrieval_profile_id"] + shared_cols],
+        on="retrieval_profile_id",
+        suffixes=("_before", "_after"),
+        how="outer",
+    )
+    rows = []
+    for _, row in merged.iterrows():
+        profile = row["retrieval_profile_id"]
+        for col in shared_cols:
+            before = row.get(f"{col}_before")
+            after = row.get(f"{col}_after")
+            if pd.isna(before) and pd.isna(after):
+                continue
+            delta = round(after - before, 2) if pd.notna(before) and pd.notna(after) else None
+            rows.append({
+                "profile": profile,
+                "metric": col.replace("avg_", "").replace("_", " "),
+                "before": round(before, 2) if pd.notna(before) else "—",
+                "after": round(after, 2) if pd.notna(after) else "—",
+                "delta": delta if delta is not None else "—",
+                "direction": (
+                    "▲" if delta is not None and delta > 0 else
+                    "▼" if delta is not None and delta < 0 else
+                    "—"
+                ),
+            })
+    return pd.DataFrame(rows)
+
+
+def _answers_for_case(evaluation, case_id: str) -> list:
+    """Return all completed entries for a given case_id, one per retrieval profile."""
+    return [
+        entry for entry in evaluation.entries
+        if entry.case_id == case_id and entry.status == "completed"
+    ]
+
+
+def _export_low_score_entries_csv(evaluation, threshold: float, score_col: str = "judge_score") -> str | None:
+    """Generate a CSV string of entries scoring below threshold, with full judge rationale."""
+    rows = []
+    for entry in evaluation.entries:
+        judge = entry.judge_scorecard
+        scorecard = entry.scorecard
+        score: float | None = None
+        if score_col == "judge_score":
+            score = judge.overall_quality_score if judge else None
+        else:
+            score = scorecard.technical_score if scorecard else None
+        if score is None or score > threshold:
+            continue
+        rows.append({
+            "question": entry.question,
+            "retrieval_profile_id": entry.retrieval_profile_id,
+            "question_type": entry.question_type,
+            "answer_preview": entry.answer_preview,
+            "technical_score": scorecard.technical_score if scorecard else "",
+            "efficiency_score": scorecard.efficiency_score if scorecard else "",
+            "judge_score": judge.overall_quality_score if judge else "",
+            "business_score": judge.business_quality_score if judge else "",
+            "groundedness": judge.groundedness_score if judge else "",
+            "completeness": judge.completeness_score if judge else "",
+            "rationale": judge.rationale if judge else "",
+            "strengths": " | ".join(judge.strengths or []) if judge else "",
+            "risks": " | ".join(judge.risks or []) if judge else "",
+            "missing_required_facts": " | ".join(judge.missing_required_facts or []) if judge else "",
+            "source_run_id": entry.source_run_id,
+            "case_id": entry.case_id,
+        })
+    if not rows:
+        return None
+    return pd.DataFrame(rows).to_csv(index=False)
 
 
 def _golden_dataset_markdown() -> str:
@@ -2497,6 +2787,57 @@ def _render_evaluation_tab(
     )
     evaluation = eval_runner.load_evaluation(selected_eval_id)
     st.session_state["experiments_last_eval_id"] = evaluation.eval_run_id
+
+    # ── 3C: Snapshot Comparison ────────────────────────────────────────────
+    if len(evaluations) >= 2:
+        with st.expander("Compare with another snapshot", expanded=False):
+            other_eval_ids = [eid for eid in eval_ids if eid != selected_eval_id]
+            compare_eval_id = st.selectbox(
+                "Baseline snapshot",
+                options=other_eval_ids,
+                format_func=lambda eid: f"{eid[:8]}… · {eval_runner.load_evaluation(eid).title}",
+                key="phase3_compare_snapshot",
+            )
+            if compare_eval_id:
+                baseline_eval = eval_runner.load_evaluation(compare_eval_id)
+                st.caption(
+                    f"Comparing **{evaluation.title}** (after) vs **{baseline_eval.title}** (before). "
+                    "Positive delta = improvement for quality metrics; negative = regression."
+                )
+                cmp_df = _snapshot_comparison_frame(baseline_eval, evaluation)
+                if cmp_df.empty:
+                    st.info("No overlapping profile metrics found between the two snapshots.")
+                else:
+                    # Render with colour coding via HTML
+                    headers = "".join(f"<th>{escape(str(c))}</th>" for c in cmp_df.columns)
+                    rows_html: list[str] = []
+                    # Metrics where bigger delta = better (quality) vs worse (cost)
+                    cost_metrics = {"total time seconds", "total tokens", "missing required fact rate", "forbidden claim violation rate"}
+                    for record in cmp_df.to_dict(orient="records"):
+                        delta_val = record.get("delta")
+                        metric_name = str(record.get("metric", "")).lower()
+                        is_cost = metric_name in cost_metrics
+                        delta_color = ""
+                        if isinstance(delta_val, (int, float)):
+                            positive_is_good = not is_cost
+                            if (delta_val > 0 and positive_is_good) or (delta_val < 0 and not positive_is_good):
+                                delta_color = "color:#3b6653;font-weight:700"
+                            elif delta_val != 0:
+                                delta_color = "color:#8f5457;font-weight:700"
+                        cells = ""
+                        for col in cmp_df.columns:
+                            val = escape(str(record.get(col, "")))
+                            style = f' style="{delta_color}"' if col == "delta" and delta_color else ""
+                            cells += f"<td{style}>{val}</td>"
+                        rows_html.append(f"<tr>{cells}</tr>")
+                    st.markdown(
+                        f"""<div class="table-shell"><div class="table-scroll">
+                        <table><thead><tr>{headers}</tr></thead>
+                        <tbody>{''.join(rows_html)}</tbody></table>
+                        </div></div>""",
+                        unsafe_allow_html=True,
+                    )
+
     if evaluation.status == "running":
         st.info(
             "This evaluation snapshot is still running. Partial entry-level results may be available "
@@ -2609,6 +2950,40 @@ def _render_evaluation_tab(
         if not suite_case_frame.empty:
             _render_table(suite_case_frame)
 
+    # ── Profile Recommendation ─────────────────────────────────────────────
+    _rec = _compute_profile_recommendation(profile_df)
+    if _rec:
+        st.subheader("Profile Recommendation")
+        st.caption(
+            "Derived from the evaluation data. Candidates for speed and cost must stay within 15 % "
+            "of the top quality score."
+        )
+        rec1, rec2, rec3, rec4 = st.columns(4)
+        with rec1:
+            _render_metric_card(
+                "Speed-First",
+                _rec["speed"] or "n/a",
+                "Fastest profile within 15 % of peak quality",
+            )
+        with rec2:
+            _render_metric_card(
+                "Quality-First",
+                _rec["quality"] or "n/a",
+                "Highest overall judge / technical score",
+            )
+        with rec3:
+            _render_metric_card(
+                "Cost-First",
+                _rec["cost"] or "n/a",
+                "Fewest tokens within 15 % of peak quality",
+            )
+        with rec4:
+            _render_metric_card(
+                "Balanced",
+                _rec["balanced"] or "n/a",
+                "Best quality-per-1k-token ratio",
+            )
+
     st.subheader("Technical Leaderboard")
     if not profile_df.empty:
         leaderboard_df = profile_df.copy()
@@ -2616,21 +2991,22 @@ def _render_evaluation_tab(
             leaderboard_df["artifact_families"] = leaderboard_df["artifact_families"].apply(
                 lambda value: ", ".join(value) if isinstance(value, list) else value
             )
-        _render_table(
-            leaderboard_df[
-                [
-                    "retrieval_profile_id",
-                    "avg_technical_score",
-                    "avg_judge_score",
-                    "avg_business_score",
-                    "avg_total_time_seconds",
-                    "avg_total_tokens",
-                    "completion_rate",
-                    "operator_win_rate",
-                    "avg_tool_calls_made",
-                ]
-            ].pipe(lambda frame: _sort_frame(frame, by="avg_technical_score", ascending=False))
-        )
+        with st.expander("Show leaderboard table", expanded=True):
+            _render_table(
+                leaderboard_df[
+                    [
+                        "retrieval_profile_id",
+                        "avg_technical_score",
+                        "avg_judge_score",
+                        "avg_business_score",
+                        "avg_total_time_seconds",
+                        "avg_total_tokens",
+                        "completion_rate",
+                        "operator_win_rate",
+                        "avg_tool_calls_made",
+                    ]
+                ].pipe(lambda frame: _sort_frame(frame, by="avg_technical_score", ascending=False))
+            )
     else:
         st.info("No profile aggregates are available yet.")
 
@@ -2649,6 +3025,7 @@ def _render_evaluation_tab(
             y="avg_total_time_seconds",
             title="Average Total Time By Profile",
         )
+    st.caption("Higher technical score = better retrieval quality. Lower total time = faster end-to-end response per query.")
 
     chart_left, chart_right = st.columns(2)
     with chart_left:
@@ -2659,12 +3036,16 @@ def _render_evaluation_tab(
             title="Average Total Tokens By Profile",
         )
     with chart_right:
-        _render_bar_chart(
-            _sort_frame(profile_df, by="operator_win_rate", ascending=False),
-            x="retrieval_profile_id",
-            y="operator_win_rate",
-            title="Operator Win Rate By Profile",
-        )
+        if not profile_df.empty and profile_df["operator_win_rate"].fillna(0).sum() > 0:
+            _render_bar_chart(
+                _sort_frame(profile_df, by="operator_win_rate", ascending=False),
+                x="retrieval_profile_id",
+                y="operator_win_rate",
+                title="Operator Win Rate By Profile",
+            )
+        else:
+            st.caption("Operator Win Rate — no wins recorded yet. Select an operator winner in the Runs tab to populate this chart.")
+    st.caption("Fewer tokens = lower cost proxy. Operator win rate = share of questions where a human reviewer preferred this profile's answer.")
 
     scatter_left, scatter_right = st.columns(2)
     with scatter_left:
@@ -2683,6 +3064,38 @@ def _render_evaluation_tab(
             title="Latency vs Technical Score",
             color="retrieval_profile_id",
         )
+    st.caption("Cost vs Latency: bottom-left is ideal (fast and cheap). Latency vs Technical Score: top-left is ideal (high quality at low latency).")
+
+    # ── Judge Quality Breakdown ────────────────────────────────────────────
+    _subscores_df = _judge_subscores_by_profile(entries_df)
+    if not _subscores_df.empty:
+        st.subheader("Judge Quality Breakdown")
+        st.caption(
+            "Five LLM-judge sub-dimensions averaged per profile. "
+            "Scores are 0–100. "
+            "Groundedness: did the answer stick to retrieved facts? "
+            "Completeness: did it cover everything the question required? "
+            "Directness: was it concise and on-point? "
+            "Actionability: could a user act on it? "
+            "Abstention Quality: did it correctly refuse unanswerable questions?"
+        )
+        with st.expander("Show sub-score table", expanded=True):
+            _render_table(_subscores_df)
+
+        # Groundedness vs Completeness scatter — key risk signal
+        if "Groundedness" in _subscores_df.columns and "Completeness" in _subscores_df.columns:
+            _gc_df = _subscores_df.rename(columns={"retrieval_profile_id": "retrieval_profile_id"})
+            _render_scatter_chart(
+                _gc_df.rename(columns={
+                    "Groundedness": "groundedness",
+                    "Completeness": "completeness",
+                }),
+                x="groundedness",
+                y="completeness",
+                title="Groundedness vs Completeness (risk posture per profile)",
+                color="retrieval_profile_id",
+            )
+            st.caption("Top-right = ideal (grounded and complete). Top-left = over-cautious (safe but thin answers). Bottom-right = hallucination risk (complete but not grounded in retrieved facts).")
 
     if not profile_df.empty and profile_df["avg_judge_score"].fillna(0).sum() > 0:
         st.subheader("Business And Gold Diagnostics")
@@ -2701,6 +3114,7 @@ def _render_evaluation_tab(
                 y="avg_gold_alignment_score",
                 title="Average Gold Alignment By Profile",
             )
+        st.caption("Business score measures practical usefulness of the answer. Gold alignment measures how closely the answer matched the reference (ground truth) answer — only meaningful when a golden dataset is attached.")
 
         business_left, business_right = st.columns(2)
         with business_left:
@@ -2719,8 +3133,39 @@ def _render_evaluation_tab(
                 title="Technical vs Business Score",
                 color="retrieval_profile_id",
             )
+        st.caption("Cost vs Business: top-left is ideal (high business value at low token cost). Technical vs Business: top-right is ideal — high scores on both independent dimensions.")
+
+    # ── Risk & Compliance ──────────────────────────────────────────────────
+    _has_risk_data = not profile_df.empty and (
+        profile_df["missing_required_fact_rate"].fillna(0).sum() > 0
+        or profile_df["forbidden_claim_violation_rate"].fillna(0).sum() > 0
+    )
+    if _has_risk_data:
+        st.subheader("Risk & Compliance")
+        st.caption(
+            "Rates are computed over judged entries only. "
+            "Missing fact rate signals corpus or retrieval gaps. "
+            "Forbidden claim rate is a production safety signal — any non-zero value warrants inspection."
+        )
+        risk_left, risk_right = st.columns(2)
+        with risk_left:
+            _render_bar_chart(
+                _sort_frame(profile_df, by="missing_required_fact_rate", ascending=False),
+                x="retrieval_profile_id",
+                y="missing_required_fact_rate",
+                title="Missing Required Fact Rate By Profile",
+            )
+        with risk_right:
+            _render_bar_chart(
+                _sort_frame(profile_df, by="forbidden_claim_violation_rate", ascending=False),
+                x="retrieval_profile_id",
+                y="forbidden_claim_violation_rate",
+                title="Forbidden Claim Violation Rate By Profile",
+            )
+        st.caption("Lower is always better on both charts. Missing fact rate = share of judged entries where a required fact was absent from the answer (corpus or retrieval gap). Forbidden claim rate = share of entries where the answer made a claim it was explicitly not supposed to (production safety risk).")
 
     st.subheader("Question Type Diagnostics")
+    st.caption("Each cell shows the average score for that profile × question type combination. Darker = higher score. Look for a profile that dominates your most common question type — or use the Routing Strategy section below to get an automatic recommendation.")
     if not qtype_df.empty:
         qtype_left, qtype_right = st.columns(2)
         with qtype_left:
@@ -2729,19 +3174,90 @@ def _render_evaluation_tab(
                 x="retrieval_profile_id",
                 y="question_type",
                 color="avg_technical_score",
-                title="Average Technical Score By Question Type",
+                title="Technical Score by Question Type × Profile",
             )
         with qtype_right:
-            if "avg_business_score" in qtype_df.columns and qtype_df["avg_business_score"].fillna(0).sum() > 0:
+            if "avg_judge_score" in qtype_df.columns and qtype_df["avg_judge_score"].fillna(0).sum() > 0:
+                _render_heatmap(
+                    qtype_df,
+                    x="retrieval_profile_id",
+                    y="question_type",
+                    color="avg_judge_score",
+                    title="Judge Score by Question Type × Profile",
+                )
+            elif "avg_business_score" in qtype_df.columns and qtype_df["avg_business_score"].fillna(0).sum() > 0:
                 _render_heatmap(
                     qtype_df,
                     x="retrieval_profile_id",
                     y="question_type",
                     color="avg_business_score",
-                    title="Average Business Score By Question Type",
+                    title="Business Score by Question Type × Profile",
                 )
+        if "avg_business_score" in qtype_df.columns and qtype_df["avg_business_score"].fillna(0).sum() > 0 \
+                and "avg_judge_score" in qtype_df.columns and qtype_df["avg_judge_score"].fillna(0).sum() > 0:
+            _render_heatmap(
+                qtype_df,
+                x="retrieval_profile_id",
+                y="question_type",
+                color="avg_business_score",
+                title="Business Score by Question Type × Profile",
+            )
     else:
         st.info("No question-type aggregates are available for this snapshot.")
+
+    # ── Failure Mode Taxonomy ──────────────────────────────────────────────
+    _top_missing, _top_risks = _aggregate_failure_modes(evaluation)
+    if _top_missing or _top_risks:
+        st.subheader("Failure Mode Taxonomy")
+        st.caption(
+            "Aggregated across all judged entries. Recurring missing facts indicate corpus or "
+            "retrieval gaps — not just answer quality issues. Recurring risks may signal "
+            "prompt, retrieval, or knowledge-base problems worth addressing."
+        )
+        fail_left, fail_right = st.columns(2)
+        with fail_left:
+            if _top_missing:
+                st.markdown("**Top Missing Required Facts**")
+                missing_rows = [
+                    {"count": count, "missing fact": fact}
+                    for fact, count in _top_missing
+                ]
+                _render_table(pd.DataFrame(missing_rows))
+            else:
+                st.caption("No missing required facts recorded across judged entries.")
+        with fail_right:
+            if _top_risks:
+                st.markdown("**Top Recurring Risks**")
+                risk_rows = [
+                    {"count": count, "risk": risk}
+                    for risk, count in _top_risks
+                ]
+                _render_table(pd.DataFrame(risk_rows))
+            else:
+                st.caption("No risks recorded across judged entries.")
+
+    # ── 3B: Routing Strategy Builder ──────────────────────────────────────
+    _routing_df = _routing_strategy_from_entries(entries_df)
+    if not _routing_df.empty:
+        st.subheader("Routing Strategy")
+        st.caption(
+            "Best retrieval profile per question type, ranked by average judge score "
+            "(falls back to technical score when judge scoring is disabled). "
+            "Confidence = high (≥5 samples) / medium (≥3) / low (<3). "
+            "Score gap shows how much better the top profile is vs the runner-up."
+        )
+        with st.expander("Show routing table", expanded=True):
+            _render_table(_routing_df)
+            dl_col, _ = st.columns([1, 3])
+            with dl_col:
+                st.download_button(
+                    "Download Routing Config JSON",
+                    data=_routing_config_json(_routing_df),
+                    file_name="routing_strategy.json",
+                    mime="application/json",
+                    key="phase3_routing_download",
+                    use_container_width=True,
+                )
 
     st.subheader("Operational Diagnostics")
     if not profile_df.empty:
@@ -2757,46 +3273,55 @@ def _render_evaluation_tab(
             var_name="diagnostic",
             value_name="rate",
         )
-        diag_chart = (
-            alt.Chart(diag_df)
-            .mark_bar()
-            .encode(
-                x=alt.X("retrieval_profile_id:N", title="Retrieval Profile"),
-                y=alt.Y("rate:Q", title="Rate"),
-                color=alt.Color("diagnostic:N", title="Diagnostic"),
-                tooltip=list(diag_df.columns),
+        if diag_df["rate"].fillna(0).sum() > 0:
+            diag_chart = (
+                alt.Chart(diag_df)
+                .mark_bar(cornerRadiusTopLeft=4, cornerRadiusTopRight=4)
+                .encode(
+                    x=alt.X("retrieval_profile_id:N", title="Retrieval Profile"),
+                    y=alt.Y("rate:Q", title="Rate"),
+                    color=alt.Color("diagnostic:N", title="Diagnostic"),
+                    tooltip=list(diag_df.columns),
+                )
+                .properties(height=300, title="Budget And Routing Diagnostics")
             )
-            .properties(height=320, title="Budget And Routing Diagnostics")
-        )
-        st.altair_chart(diag_chart, use_container_width=True)
+            st.altair_chart(_configured_chart(diag_chart), use_container_width=True)
+        else:
+            st.caption("Budget and Routing Diagnostics — no budget exhaustion or broadened routing events recorded for this snapshot.")
 
     if not build_df.empty:
-        st.markdown("**Build × Profile Rollup**")
-        _render_table(_sort_frame(build_df, by="avg_technical_score", ascending=False))
+        with st.expander("Build × Profile Rollup", expanded=False):
+            st.caption("Average technical score broken down by which build preset was used alongside each retrieval profile. Useful for spotting if a particular artifact build (e.g. pageindex_related_enhanced) consistently outperforms others.")
+            _render_table(_sort_frame(build_df, by="avg_technical_score", ascending=False))
 
     if not corpus_df.empty:
-        st.markdown("**Corpus × Profile Rollup**")
-        _render_table(_sort_frame(corpus_df, by="avg_technical_score", ascending=False))
+        with st.expander("Corpus × Profile Rollup", expanded=False):
+            st.caption("Average technical score per corpus × profile combination. Use this to check if score differences are driven by the corpus (document set) rather than the retrieval profile.")
+            _render_table(_sort_frame(corpus_df, by="avg_technical_score", ascending=False))
 
     st.subheader("Entry Deep Dive")
     if entries_df.empty:
         st.info("No entry-level evaluation data is available.")
     else:
-        profile_filter = st.selectbox(
-            "Filter by retrieval profile",
-            options=["All", *sorted(entries_df["retrieval_profile_id"].dropna().unique().tolist())],
-            index=0,
-        )
-        qtype_filter = st.selectbox(
-            "Filter by question type",
-            options=["All", *sorted(entries_df["question_type"].dropna().unique().tolist())],
-            index=0,
-        )
-        status_filter = st.selectbox(
-            "Filter by status",
-            options=["All", *sorted(entries_df["status"].dropna().unique().tolist())],
-            index=0,
-        )
+        f_col1, f_col2, f_col3 = st.columns(3)
+        with f_col1:
+            profile_filter = st.selectbox(
+                "Filter by retrieval profile",
+                options=["All", *sorted(entries_df["retrieval_profile_id"].dropna().unique().tolist())],
+                index=0,
+            )
+        with f_col2:
+            qtype_filter = st.selectbox(
+                "Filter by question type",
+                options=["All", *sorted(entries_df["question_type"].dropna().unique().tolist())],
+                index=0,
+            )
+        with f_col3:
+            status_filter = st.selectbox(
+                "Filter by status",
+                options=["All", *sorted(entries_df["status"].dropna().unique().tolist())],
+                index=0,
+            )
         filtered_entries = entries_df.copy()
         if profile_filter != "All":
             filtered_entries = filtered_entries[
@@ -2807,43 +3332,347 @@ def _render_evaluation_tab(
         if status_filter != "All":
             filtered_entries = filtered_entries[filtered_entries["status"] == status_filter]
 
-        _render_table(
-            _sort_frame(
-                filtered_entries,
-                by=["judge_score", "technical_score", "total_time_seconds"],
-                ascending=[False, False, True],
+        # Build a focused display frame — truncate question, drop uninformative columns
+        display_df = filtered_entries.copy()
+        if "question" in display_df.columns:
+            display_df["question"] = display_df["question"].apply(
+                lambda q: (q[:68] + "…") if q and len(q) > 68 else (q or "")
             )
-        )
+        display_cols = [c for c in [
+            "question",
+            "retrieval_profile_id",
+            "question_type",
+            "technical_score",
+            "judge_score",
+            "business_score",
+            "groundedness_score",
+            "total_time_seconds",
+            "total_tokens",
+            "status",
+        ] if c in display_df.columns]
+        with st.expander(f"Show entry table ({len(filtered_entries)} entries)", expanded=True):
+            st.caption("Sorted by judge score descending, then technical score. Click 'Inspect evaluated entry' below to drill into any specific entry's full scorecard and rationale.")
+            _render_table(
+                _sort_frame(
+                    display_df[display_cols],
+                    by=["judge_score", "technical_score", "total_time_seconds"],
+                    ascending=[False, False, True],
+                )
+            )
 
-        entry_options = [
-            f"{entry.source_run_id} :: {entry.label}"
-            for entry in evaluation.entries
-        ]
-        selected_entry_key = st.selectbox(
-            "Inspect evaluated entry",
+        def _entry_label(entry) -> str:
+            q = entry.question.strip()
+            q_short = q if len(q) <= 72 else q[:69] + "…"
+            judge = entry.judge_scorecard
+            score_tag = f" [{judge.overall_quality_score:.0f}]" if judge and judge.overall_quality_score is not None else ""
+            return f"{q_short}{score_tag}  —  {entry.retrieval_profile_id} · {entry.question_type}"
+
+        # ── Entry inspector filters ──────────────────────────────────────────
+        st.markdown("**Inspect evaluated entry**")
+        st.caption("Use the filters below to narrow the list, then pick an entry to drill in.")
+        _all_entries = evaluation.entries
+        _qtypes_all = sorted({e.question_type for e in _all_entries if e.question_type})
+        _runs_all = sorted({e.source_run_title for e in _all_entries if e.source_run_title})
+        _profiles_all = sorted({e.retrieval_profile_id for e in _all_entries if e.retrieval_profile_id})
+
+        _fcol1, _fcol2, _fcol3, _fcol4 = st.columns([2, 2, 2, 1])
+        with _fcol1:
+            _f_qtype = st.selectbox(
+                "Question type",
+                options=["All"] + _qtypes_all,
+                key="inspector_f_qtype",
+            )
+        with _fcol2:
+            _f_run = st.selectbox(
+                "Build / run",
+                options=["All"] + _runs_all,
+                key="inspector_f_run",
+            )
+        with _fcol3:
+            _f_profile = st.selectbox(
+                "Retrieval profile",
+                options=["All"] + _profiles_all,
+                key="inspector_f_profile",
+            )
+        with _fcol4:
+            _f_min_score = st.number_input(
+                "Min judge score",
+                min_value=0,
+                max_value=100,
+                value=0,
+                step=5,
+                key="inspector_f_minscore",
+            )
+
+        def _entry_passes_filters(e) -> bool:
+            if _f_qtype != "All" and e.question_type != _f_qtype:
+                return False
+            if _f_run != "All" and e.source_run_title != _f_run:
+                return False
+            if _f_profile != "All" and e.retrieval_profile_id != _f_profile:
+                return False
+            if _f_min_score > 0:
+                judge_s = e.judge_scorecard
+                score = judge_s.overall_quality_score if judge_s else None
+                if score is None or score < _f_min_score:
+                    return False
+            return True
+
+        entry_options = [i for i, e in enumerate(_all_entries) if _entry_passes_filters(e)]
+        if not entry_options:
+            st.warning("No entries match the current filters.")
+            entry_options = list(range(len(_all_entries)))
+
+        st.caption(f"{len(entry_options)} of {len(_all_entries)} entries match filters")
+        selected_entry_idx = st.selectbox(
+            "Select entry",
             options=entry_options,
+            format_func=lambda i: _entry_label(evaluation.entries[i]),
             index=0,
+            key="inspector_entry_select",
         )
-        selected_entry = next(
-            entry
-            for entry in evaluation.entries
-            if f"{entry.source_run_id} :: {entry.label}" == selected_entry_key
-        )
-        st.markdown("**Entry Scorecard**")
-        st.json(selected_entry.scorecard.model_dump(mode="json") if selected_entry.scorecard else {})
-        st.markdown("**Judge Scorecard**")
-        st.json(selected_entry.judge_scorecard.model_dump(mode="json") if selected_entry.judge_scorecard else {})
-        st.markdown("**Raw Metrics**")
-        st.json(selected_entry.metrics)
-        st.markdown("**Diagnostics**")
-        st.json(selected_entry.diagnostics)
-        matched_case = evaluation.suite.case_lookup().get(selected_entry.case_id)
-        if matched_case is not None:
-            st.markdown("**Golden Dataset Case**")
-            st.json(matched_case.model_dump(mode="json"))
+        selected_entry = evaluation.entries[selected_entry_idx]
+
+        # ── Entry context header ─────────────────────────────────────────────
+        st.markdown("---")
+        _meta1, _meta2, _meta3, _meta4 = st.columns([3, 1, 1, 1])
+        with _meta1:
+            _full_q = selected_entry.question.strip()
+            st.markdown(f"**{_full_q}**")
+            st.caption(f"Case: `{selected_entry.case_id}`")
+        with _meta2:
+            st.markdown("**Profile**")
+            st.markdown(f"`{selected_entry.retrieval_profile_id}`")
+        with _meta3:
+            st.markdown("**Question type**")
+            st.markdown(f"`{selected_entry.question_type}`")
+        with _meta4:
+            st.markdown("**Run**")
+            _rtitle = selected_entry.source_run_title or selected_entry.source_run_id[:8]
+            st.markdown(f"`{_rtitle}`")
+
+        st.markdown("---")
+
+        def _score_tile(col, label, value, decimals=0):
+            with col:
+                if value is None:
+                    st.metric(label, "—")
+                else:
+                    color = "🟢" if value >= 70 else "🟡" if value >= 40 else "🔴"
+                    fmt = f"{value:.{decimals}f}"
+                    st.metric(label, f"{color} {fmt}")
+
+        # ── Technical Scorecard ──────────────────────────────────────────────
+        _sc = selected_entry.scorecard
+        st.markdown("##### Technical Scorecard")
+        st.caption("Deterministic — computed from runtime trace data, no LLM involved.")
+        if _sc:
+            sc1, sc2, sc3, sc4 = st.columns(4)
+            _score_tile(sc1, "Technical", _sc.technical_score, 1)
+            _score_tile(sc2, "Efficiency", _sc.efficiency_score, 1)
+            _score_tile(sc3, "Reliability", _sc.reliability_score, 1)
+            _score_tile(sc4, "Retrieval Discipline", _sc.retrieval_discipline_score, 1)
+            if _sc.notes:
+                with st.expander("Scoring notes", expanded=False):
+                    for _note in _sc.notes:
+                        st.markdown(f"- {_note}")
+        else:
+            st.caption("No technical scorecard available for this entry.")
+
+        st.markdown("")
+
+        # ── Judge Scorecard ──────────────────────────────────────────────────
+        judge = selected_entry.judge_scorecard
+        st.markdown("##### Judge Scorecard")
+        st.caption("LLM-evaluated — scored at temperature 0 against the retrieved context and case constraints.")
+        if judge:
+            # Composite scores
+            j1, j2, j3, j4 = st.columns(4)
+            _score_tile(j1, "Overall", judge.overall_quality_score)
+            _score_tile(j2, "Technical Quality", judge.technical_quality_score)
+            _score_tile(j3, "Business Quality", judge.business_quality_score)
+            _score_tile(j4, "Gold Alignment", judge.gold_alignment_score)
+
+            st.markdown("")
+
+            # Sub-dimension scores
+            st.markdown("**Sub-dimensions**")
+            d1, d2, d3, d4, d5 = st.columns(5)
+            _score_tile(d1, "Groundedness", judge.groundedness_score)
+            _score_tile(d2, "Completeness", judge.completeness_score)
+            _score_tile(d3, "Directness", judge.directness_score)
+            _score_tile(d4, "Actionability", judge.actionability_score)
+            _score_tile(d5, "Abstention Q.", judge.abstention_quality_score)
+
+            st.markdown("")
+
+            # Rationale
+            if judge.rationale:
+                st.markdown("**Rationale**")
+                st.info(judge.rationale)
+
+            # Strengths + Risks side by side
+            _has_strengths = bool(judge.strengths)
+            _has_risks = bool(judge.risks)
+            if _has_strengths or _has_risks:
+                str_col, risk_col = st.columns(2)
+                with str_col:
+                    if _has_strengths:
+                        st.markdown("**Strengths**")
+                        for s in judge.strengths:
+                            st.markdown(f"- ✅ {s}")
+                with risk_col:
+                    if _has_risks:
+                        st.markdown("**Risks**")
+                        for r in judge.risks:
+                            st.markdown(f"- ⚠️ {r}")
+
+            # Missing facts + Violations side by side
+            _has_missing = bool(judge.missing_required_facts)
+            _has_violations = bool(judge.forbidden_claim_violations)
+            if _has_missing or _has_violations:
+                mf_col, fv_col = st.columns(2)
+                with mf_col:
+                    if _has_missing:
+                        st.markdown("**Missing Required Facts**")
+                        for f in judge.missing_required_facts:
+                            st.markdown(f"- ❌ {f}")
+                with fv_col:
+                    if _has_violations:
+                        st.markdown("**Forbidden Claim Violations**")
+                        for v in judge.forbidden_claim_violations:
+                            st.markdown(f"- 🚫 {v}")
+
+            if judge.matched_gold_sources:
+                with st.expander(f"Matched gold sources ({len(judge.matched_gold_sources)})", expanded=False):
+                    for src in judge.matched_gold_sources:
+                        st.markdown(f"- `{src}`")
+        else:
+            st.caption("No judge scorecard — enable judge scoring when generating the evaluation.")
+
+        # ── Developer details (collapsed by default) ─────────────────────────
+        st.markdown("")
+        with st.expander("Developer details", expanded=False):
+            st.markdown("**Raw Metrics**")
+            st.json(selected_entry.metrics)
+            st.markdown("**Diagnostics**")
+            st.json(selected_entry.diagnostics)
+            matched_case = evaluation.suite.case_lookup().get(selected_entry.case_id)
+            if matched_case is not None:
+                st.markdown("**Golden Dataset Case**")
+                st.json(matched_case.model_dump(mode="json"))
+            if judge:
+                st.markdown("**Raw Judge Scorecard**")
+                st.json(judge.model_dump(mode="json"))
         if selected_entry.trace_path:
-            with st.expander("Trace Payload", expanded=False):
+            with st.expander("Trace payload", expanded=False):
                 st.json(_safe_read_json(selected_entry.trace_path))
+
+        # ── 3A: Answer Comparison View ─────────────────────────────────────
+        st.write("")
+        with st.expander("Compare answers across profiles for a case", expanded=False):
+            st.caption(
+                "Select a case (question) to see every profile's answer and scores side by side. "
+                "Uses the answer preview stored in the evaluation manifest."
+            )
+            # Build unique cases from entries that have at least 2 profiles
+            _case_counts: dict[str, int] = {}
+            for _e in evaluation.entries:
+                if _e.status == "completed":
+                    _case_counts[_e.case_id] = _case_counts.get(_e.case_id, 0) + 1
+            _comparable_cases = [cid for cid, cnt in _case_counts.items() if cnt >= 2]
+            if not _comparable_cases:
+                st.info("No case has been answered by 2 or more profiles yet.")
+            else:
+                _case_lookup = evaluation.suite.case_lookup()
+                _compare_case_id = st.selectbox(
+                    "Select case to compare",
+                    options=_comparable_cases,
+                    format_func=lambda cid: (
+                        (_case_lookup[cid].question[:90] + "…")
+                        if cid in _case_lookup and len(_case_lookup[cid].question) > 90
+                        else (_case_lookup[cid].question if cid in _case_lookup else cid)
+                    ),
+                    key="phase3_compare_case",
+                )
+                _case_entries = _answers_for_case(evaluation, _compare_case_id)
+                if _case_entries:
+                    _case_obj = _case_lookup.get(_compare_case_id)
+                    if _case_obj:
+                        st.markdown(f"**Question:** {_case_obj.question}")
+                        if _case_obj.ground_truth_answer:
+                            with st.expander("Ground truth answer", expanded=False):
+                                st.markdown(_case_obj.ground_truth_answer)
+                    n_profiles = len(_case_entries)
+                    _ans_cols = st.columns(min(n_profiles, 3))
+                    for _col_idx, _ce in enumerate(_case_entries):
+                        _col = _ans_cols[_col_idx % len(_ans_cols)]
+                        with _col:
+                            _ce_judge = _ce.judge_scorecard
+                            _ce_sc = _ce.scorecard
+                            j_score = f"{_ce_judge.overall_quality_score:.0f}" if _ce_judge and _ce_judge.overall_quality_score is not None else "—"
+                            t_score = f"{_ce_sc.technical_score:.0f}" if _ce_sc else "—"
+                            st.markdown(
+                                f"**{_ce.retrieval_profile_id}**  \n"
+                                f"<span style='color:var(--muted);font-size:0.85rem'>"
+                                f"judge {j_score} · tech {t_score}"
+                                f"</span>",
+                                unsafe_allow_html=True,
+                            )
+                            st.markdown(
+                                _ce.answer_preview if _ce.answer_preview else "_No preview available._"
+                            )
+                            if _ce_judge and _ce_judge.rationale:
+                                with st.expander("Rationale", expanded=False):
+                                    st.caption(_ce_judge.rationale)
+
+        # ── 3D: Low-Score Entry Export ─────────────────────────────────────
+        with st.expander("Export low-scoring entries for improvement", expanded=False):
+            st.caption(
+                "Download a CSV of entries below a score threshold, including judge rationale, "
+                "strengths, risks, and missing facts. Use this to feed a focused improvement cycle."
+            )
+            _has_judge_scores = entries_df["judge_score"].notna().any() if "judge_score" in entries_df.columns else False
+            _export_score_col = st.radio(
+                "Score to filter on",
+                options=["judge_score", "technical_score"] if _has_judge_scores else ["technical_score"],
+                format_func=lambda c: "Judge Score (overall quality)" if c == "judge_score" else "Technical Score (deterministic)",
+                horizontal=True,
+                key="phase3_export_score_col",
+            )
+            _export_threshold = st.slider(
+                "Export entries with score below",
+                min_value=0,
+                max_value=100,
+                value=65,
+                step=5,
+                key="phase3_export_threshold",
+            )
+            _below_count = sum(
+                1 for _e in evaluation.entries
+                if (
+                    (_export_score_col == "judge_score" and _e.judge_scorecard and
+                     _e.judge_scorecard.overall_quality_score is not None and
+                     _e.judge_scorecard.overall_quality_score <= _export_threshold)
+                    or
+                    (_export_score_col == "technical_score" and _e.scorecard and
+                     _e.scorecard.technical_score <= _export_threshold)
+                )
+            )
+            st.caption(f"Entries matching filter: **{_below_count}** of {len(evaluation.entries)} total.")
+            if _below_count > 0:
+                _csv_data = _export_low_score_entries_csv(evaluation, _export_threshold, _export_score_col)
+                if _csv_data:
+                    st.download_button(
+                        f"Download {_below_count} entries as CSV",
+                        data=_csv_data,
+                        file_name=f"low_score_entries_{evaluation.eval_run_id[:8]}_threshold{_export_threshold}.csv",
+                        mime="text/csv",
+                        key="phase3_export_csv",
+                        use_container_width=False,
+                    )
+            else:
+                st.info("No entries fall below the selected threshold.")
 
     if evaluation.report_paths:
         st.subheader("Evaluation Exports")

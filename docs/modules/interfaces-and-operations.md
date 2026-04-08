@@ -2,8 +2,8 @@
 
 Primary code:
 
-- `cli.py`
 - `app.py`
+- `cli.py`
 - `api/app.py`
 - `api/contracts.py`
 - `api/runtime.py`
@@ -12,265 +12,298 @@ Primary code:
 
 ## Purpose
 
-This document maps the repository's user-facing entrypoints:
+This document maps the repository’s human-facing and programmatic entrypoints:
 
-- CLI
 - main Streamlit app
+- CLI
 - FastAPI adapter
 - experiments Streamlit app
 
-## Local Run Commands
+It focuses on what each interface can actually do today, which backend path it exercises, and where the current parity gaps are.
 
-Install core dependencies:
+## Run Commands
 
-```bash
-pip install -r requirements.txt
-```
-
-Run the main Streamlit app:
+Main app:
 
 ```bash
 streamlit run app.py
 ```
 
-Run the FastAPI adapter:
+Experiments app:
+
+```bash
+streamlit run experiments_app.py
+```
+
+API:
 
 ```bash
 uvicorn api.app:app --reload
 ```
 
-Run the CLI:
+CLI help:
 
 ```bash
 python cli.py --help
 ```
 
-Run the experiments UI:
+React frontend:
 
 ```bash
-pip install -r requirements-experiments.txt
-streamlit run experiments_app.py
+cd frontend
+npm install
+npm run dev
 ```
 
-## CLI
+## Interface Capability Matrix
 
-`cli.py` is the main operational interface for local ingestion, querying, inspection, and trace access.
-
-### Command groups
-
-| Command | Purpose |
-| --- | --- |
-| `init` | Write a `.env` file interactively |
-| `ingest` | Ingest one document into the active project |
-| `query` | Run a query with optional follow-up turns |
-| `list-docs` | List documents in the active project |
-| `show-master-tree` | Print the whole master tree or one node |
-| `delete-doc` | Delete one document's artifacts |
-| `delete-project` | Delete an entire project namespace |
-| `reingest` | Replace a document by deleting then ingesting again |
-| `traces list` | List recent traces |
-| `traces show` | Show a full trace |
-| `traces stats` | Summarize trace metrics |
-| `traces export` | Export traces as JSON or CSV |
-
-### Common examples
-
-Ingest:
-
-```bash
-python cli.py ingest \
-  --file ./docs/spec.pdf \
-  --doc-id auth_spec \
-  --title "Auth Spec" \
-  --doc-type technical_spec \
-  --project default
-```
-
-Query:
-
-```bash
-python cli.py query "How does token refresh work?" \
-  --project default \
-  --retrieval-mode hybrid \
-  --advanced \
-  --max-docs 3 \
-  --reasoning-effort medium
-```
-
-Inspect traces:
-
-```bash
-python cli.py traces list --project default
-python cli.py traces stats --project default
-```
-
-### Important CLI limitations
-
-- The CLI supports `relationship_mode`, advanced retrieval flags, and retrieval mode selection.
-- The CLI does not currently expose the new `contains_images` ingestion flag.
-
-## FastAPI Adapter
-
-The API is a thin adapter over the same runtime used by Streamlit and the CLI.
-
-### Endpoints
-
-| Method | Path | Purpose |
-| --- | --- | --- |
-| `GET` | `/api/health` | Health check |
-| `GET` | `/api/projects` | List projects |
-| `POST` | `/api/projects` | Create or resolve project runtime |
-| `DELETE` | `/api/projects/{project}` | Delete a project |
-| `GET` | `/api/models` | List model names |
-| `POST` | `/api/models` | Register a model name |
-| `GET` | `/api/runtime` | Return runtime summary for project/model |
-| `GET` | `/api/documents` | List document records |
-| `GET` | `/api/documents/{doc_id}` | Get one master-node document record |
-| `GET` | `/api/documents/{doc_id}/tree` | Load one per-document tree |
-| `POST` | `/api/query` | Execute a query |
-| `POST` | `/api/ingest` | Upload and ingest one document |
-| `GET` | `/api/traces` | List traces |
-| `GET` | `/api/traces/stats` | Trace stats |
-| `GET` | `/api/traces/{trace_id}` | Full trace detail |
-| `POST` | `/api/traces/{trace_id}/analysis` | Run post-hoc analysis |
-
-### Query request shape
-
-`POST /api/query` accepts JSON like:
-
-```json
-{
-  "project": "default",
-  "model": "gpt-4o",
-  "user_query": "How does token refresh work?",
-  "conversation_context": [
-    { "role": "user", "content": "Earlier question" }
-  ],
-  "max_docs": 3,
-  "reasoning_effort": "medium",
-  "retrieval_mode": "hybrid",
-  "advanced_retrieval": {
-    "enabled": true,
-    "enable_planning": true,
-    "enable_adaptive_width": true,
-    "enable_node_expansion": true,
-    "max_docs_cap": 6,
-    "max_nodes_cap": 6
-  }
-}
-```
-
-### Ingestion request shape
-
-`POST /api/ingest` is multipart form data:
-
-- `file`
-- `project`
-- `model` optional
-- `doc_id`
-- `doc_title`
-- `doc_type`
-- `top_sections_target` optional
-- `relationship_mode`
-
-Current limitation:
-
-- there is no `contains_images` form field yet
-
-### Example API calls
-
-Query:
-
-```bash
-curl -X POST http://localhost:8000/api/query \
-  -H "Content-Type: application/json" \
-  -d '{
-    "project": "default",
-    "user_query": "Summarize the onboarding workflow",
-    "max_docs": 3,
-    "retrieval_mode": "hybrid",
-    "advanced_retrieval": {
-      "enabled": false,
-      "enable_planning": true,
-      "enable_adaptive_width": true,
-      "enable_node_expansion": true,
-      "max_docs_cap": 6,
-      "max_nodes_cap": 6
-    }
-  }'
-```
-
-Ingest:
-
-```bash
-curl -X POST http://localhost:8000/api/ingest \
-  -F project=default \
-  -F doc_id=auth_spec \
-  -F doc_title="Auth Spec" \
-  -F doc_type=technical_spec \
-  -F relationship_mode=basic \
-  -F file=@./auth_spec.pdf
-```
+| Capability | Main Streamlit | CLI | FastAPI | React | Experiments UI |
+| --- | --- | --- | --- | --- | --- |
+| create/select project | yes | yes | yes | yes | n/a |
+| select model | yes | yes | yes | yes | yes |
+| ingest PDF/MD/DOCX | yes | yes | yes | yes | corpus upload only |
+| image-aware PDF ingest | yes | no | no | no | no |
+| query hybrid | yes | yes | yes | yes | yes |
+| query pageindex | yes | yes | yes | yes | yes |
+| advanced retrieval controls | yes | yes | yes | yes | yes |
+| inspect PageIndex tree | yes | indirect | yes | yes | yes for experiment builds |
+| inspect traces | yes | yes | yes | yes | run/eval artifacts only |
+| post-hoc trace analysis | yes | yes | yes | yes | n/a |
+| create corpora/builds/runs/evals | no | no | no | no | yes |
 
 ## Main Streamlit App
 
-`app.py` is the original full-stack UI over the runtime.
+`app.py` is the richest operational surface for the main runtime.
 
-### Main tabs
+### What it exposes
 
-- `Upload`
-- `Ask`
-- `Docs`
-- `Map`
-- `Audit`
+- project selection and creation
+- model selection and registration
+- query controls
+- retrieval mode selection
+- advanced retrieval toggles
+- ingestion form
+- image-aware PDF ingestion
+- document inspection
+- PageIndex outline and raw tree JSON
+- trace browsing and analysis
+- project deletion
 
-### Key behaviors
+### Why it matters
 
-- Project and model selectors are part of the runtime shell.
-- Ingestion runs through a background-thread async bridge with progress rendering.
-- Querying supports streaming answer tokens in the UI.
-- Retrieved image references can be rendered inline when present.
+This app is currently the only interface that surfaces the full image-aware ingestion path end to end.
 
-### Streamlit-only features today
+### Notable UI behavior
 
-- PDF ingestion checkbox: `Document contains meaningful images`
-- rendering stored image files from `QueryResult.image_refs`
+- The sidebar controls global runtime context such as project and model.
+- Query controls are explicit and can toggle advanced retrieval.
+- The docs area can render both a human-readable outline and raw PageIndex tree JSON.
+- The app includes custom CSS and a strong visual treatment rather than default Streamlit styling.
 
-### Main session state keys
+### Important nuance
 
-The app stores important runtime/session objects in Streamlit state, including:
+The main Streamlit app can render retrieved image references in answers. That capability is not currently mirrored in React.
 
-- `chat_history`
-- `latest_query`
-- `latest_ingestion`
-- `selected_doc_id`
-- `active_index_key`
-- `retrieval_reasoning_effort`
-- `project_name`
+## CLI
 
-### UI and styling notes
+`cli.py` is the operational shell for local workflows and scripting-friendly inspection.
 
-- The app uses custom CSS injected directly from Python.
-- The `.streamlit/config.toml` file forces `fileWatcherType = "poll"` to avoid noisy lazy-import watcher issues from transformer-related modules.
+### Main commands
+
+| Command | Purpose |
+| --- | --- |
+| `init` | create `.env` interactively |
+| `ingest` | ingest one document into a project |
+| `query` | run a query |
+| `list-docs` | list project documents |
+| `show-master-tree` | print the master tree or one node |
+| `delete-doc` | delete one document’s artifacts |
+| `delete-project` | delete a whole project index |
+| `reingest` | replace a document by delete + ingest |
+| `traces list` | list recent traces |
+| `traces show` | show full trace detail |
+| `traces stats` | show aggregated stats |
+| `traces export` | export traces |
+
+### Important CLI strengths
+
+- exposes retrieval mode selection
+- exposes advanced retrieval toggles
+- exposes relationship maintenance mode
+- exposes trace access without any UI
+
+### Important CLI gaps
+
+- no `contains_images` flag for image-aware PDF ingestion
+- no live ingestion progress stream as rich as the main Streamlit app
+
+## FastAPI Adapter
+
+The API is intentionally thin. It does not reimplement business logic. It calls the same runtime, ingestion, retrieval, and trace layers used elsewhere.
+
+### Endpoint map
+
+| Method | Path | Purpose |
+| --- | --- | --- |
+| `GET` | `/api/health` | health check |
+| `GET` | `/api/projects` | list projects |
+| `POST` | `/api/projects` | create or resolve project runtime |
+| `DELETE` | `/api/projects/{project}` | delete project index artifacts |
+| `GET` | `/api/models` | list registered model names |
+| `POST` | `/api/models` | register a model name |
+| `GET` | `/api/runtime` | runtime summary for project/model |
+| `GET` | `/api/documents` | list documents |
+| `GET` | `/api/documents/{doc_id}` | get one master node |
+| `GET` | `/api/documents/{doc_id}/tree` | get one PageIndex tree |
+| `POST` | `/api/query` | execute a query |
+| `POST` | `/api/ingest` | upload and ingest one document |
+| `GET` | `/api/traces` | list traces |
+| `GET` | `/api/traces/stats` | trace stats |
+| `GET` | `/api/traces/{trace_id}` | get one full trace |
+| `POST` | `/api/traces/{trace_id}/analysis` | run post-hoc trace analysis |
+
+### Query request shape
+
+The query API supports:
+
+- project
+- optional model
+- user query
+- conversation context
+- max docs
+- reasoning effort
+- retrieval mode
+- advanced retrieval bundle
+
+That makes the API broadly capable for query-time experimentation.
+
+### Ingestion request shape
+
+The ingestion API currently supports:
+
+- file
+- project
+- optional model
+- `doc_id`
+- `doc_title`
+- `doc_type`
+- `top_sections_target`
+- `relationship_mode`
+
+### Important API gap
+
+The ingestion API does not currently expose `contains_images`, which means the image-aware PDF branch cannot be triggered through FastAPI today.
+
+## React Frontend As An Operational Surface
+
+The React frontend is covered in detail in its own module doc, but operationally it is a thin client over the FastAPI adapter.
+
+That means every API-level omission becomes a React omission.
+
+Current important examples:
+
+- React cannot trigger image-aware PDF ingestion because the API cannot.
+- React does not have answer streaming because the API flow it uses is still request/response.
 
 ## Experiments Streamlit App
 
-`experiments_app.py` is a separate UI for the experiments harness.
+`experiments_app.py` is the operational surface for the experiments harness.
 
-It is intentionally isolated from the main app and focuses on:
+### Main tabs and jobs
 
-- corpus registration
-- build creation
-- comparison runs
+- overview
+- corpora
+- builds
+- compare
+- runs
+- evaluation
 - reports
-- aggregate summaries
 
-It also carries its own custom visual theme and should be treated as a separate lab surface, not as a runtime control panel for the main app.
+### Important split flows
 
-## Operational Mismatches To Remember
+Some of the most important experiments flows span multiple tabs.
 
-- Streamlit can drive image-aware PDF ingestion; CLI, FastAPI, and React currently cannot.
-- Streamlit streams answer tokens; React currently waits for full responses.
-- Streamlit renders retrieved image references; React currently does not expose them.
-- The API is thin and current-state accurate, but not every backend capability has been surfaced through it yet.
-- The Inspect UI copy suggests project deletion also removes traces, but the current backend `delete_project()` path removes index artifacts only.
+Golden dataset workflow:
+
+1. import the suite in `Evaluation`
+2. run suite cases from `Compare`
+3. inspect resulting suite-linked runs in `Compare` or `Runs`
+4. evaluate those runs back in `Evaluation`
+
+That flow is workable, but it is not obvious unless you already know how the experiments app is partitioned.
+
+### What it can do
+
+- register corpora from uploaded files
+- build artifact variants
+- create comparison runs across builds and retrieval profiles
+- execute a single-question comparison
+- execute a golden-dataset batch where each case becomes its own run
+- import and persist evaluation suites from CSV or JSON
+- evaluate selected runs deterministically and optionally with an LLM judge
+- export reports
+
+### Important newer behavior
+
+The experiments UI now shows progress for:
+
+- comparison runs
+- golden-dataset suite batches
+- evaluation snapshots
+
+This matters because long-running suite and evaluation actions are no longer opaque spinner-only actions.
+
+The newer progress model is especially useful because:
+
+- suite batches execute one case at a time
+- evaluation time scales with run entries and judge calls, not just with top-level run count
+
+## Flow Guide
+
+### Flow: operational document QA through main app
+
+1. choose project
+2. choose model
+3. ingest documents
+4. inspect document trees if needed
+5. run queries
+6. inspect traces when retrieval quality looks wrong
+
+### Flow: script or terminal-first use
+
+1. use `python cli.py ingest ...`
+2. use `python cli.py query ...`
+3. inspect `traces` or `show-master-tree` as needed
+
+### Flow: API-backed product surface
+
+1. client fetches runtime summary
+2. client uploads or queries via FastAPI
+3. client optionally browses document trees and traces
+
+### Flow: experiments-driven evaluation
+
+1. register corpus
+2. run build presets
+3. create comparison entries
+4. choose single question or golden-dataset batch
+5. run evaluation snapshot
+6. inspect reports
+
+## Operational Mismatches To Know
+
+- Main Streamlit supports image-aware ingestion; CLI, API, and React do not.
+- React Inspect says project deletion removes traces, but `delete_project()` only removes project index artifacts.
+- The experiments app is not just a UI skin over the main app. It uses a different persistence root and a different orchestration model.
+
+## What Is Possible In This Module
+
+Across all interfaces, the repository currently supports:
+
+- local operational QA against project-scoped indexes
+- document ingestion and reingestion
+- inspection of PageIndex trees
+- inspection and export of traces
+- controlled experiment execution and evaluation
+
+The exact surface area depends strongly on which interface you use.

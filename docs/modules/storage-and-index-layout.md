@@ -8,19 +8,21 @@ Primary code:
 - `storage/mongo_store.py`
 - `index_registry.py`
 - `traces/store.py`
+- `experiments/layout.py`
 
 ## Purpose
 
 The storage layer persists the artifacts produced by ingestion and consumed by retrieval.
 
-There are two persistence families in the main runtime:
+There are three different storage stories in this repository:
 
-- document/index artifacts
-- query audit traces
+1. main-runtime knowledge artifacts
+2. main-runtime trace artifacts
+3. experiments artifacts
 
-## Local Filesystem Layout
+Keeping those separate is essential to understanding why certain delete flows, UI views, and experiment runs behave the way they do.
 
-For the main runtime, the local layout is:
+## Main Runtime Local Layout
 
 ```text
 data/
@@ -43,122 +45,260 @@ data/
   model_registry.json
 ```
 
-## `DocumentStore`
+## What Lives Where
 
-The local `DocumentStore` is responsible for:
+### `data/indexes/{project}/`
 
-- saving and loading per-document trees
+This is the active knowledge base for one project.
+
+It stores:
+
+- the master tree
+- per-document trees
+- source-path registry
+- derived markdown
+- image artifacts
+- lightweight index metadata
+
+### `data/uploads/`
+
+This is a temporary operational staging area used by the FastAPI adapter when users upload files through the API.
+
+The uploaded file is first written here, then the ingestion pipeline is run against that saved path.
+
+### `data/traces/{project}/`
+
+This stores one query audit trace file per completed query for that project.
+
+Traces are not part of the knowledge index. They are execution records.
+
+### `data/model_registry.json`
+
+This stores user-visible model names and deployment labels.
+
+It is global to the whole runtime, not project-scoped.
+
+## `DocumentStore` Responsibilities
+
+The local `DocumentStore` is the file-based implementation for knowledge artifacts.
+
+It is responsible for:
+
+- saving and loading per-document PageIndex trees
 - saving derived markdown
-- registering source paths
-- loading the retrieval-time source path
-- deleting document artifacts
+- registering original and retrieval paths
+- loading the retrieval-time path for fetchers
+- deleting per-document artifacts
 - saving and loading extracted images
 
-The source registry is important because the retrieval path is not always the original file path.
+The document store is not just a dumb file wrapper. It also encodes the path indirection that makes DOCX conversion and image-enriched PDFs work cleanly.
 
-Examples:
+## Source Path vs Retrieval Path
 
-- DOCX original path, but markdown retrieval path
-- PDF original path, but enriched markdown retrieval path when image analysis is enabled
+This is one of the most important storage nuances in the codebase.
 
-## Local Path Semantics
+For each document, the store can record both:
 
-`register_doc_source()` tracks:
+- `source_path`
+- `retrieval_path`
 
-- the original source path
-- an optional retrieval path
+Why both exist:
 
-The fetcher uses `load_doc_source_path()` to find the actual text source it should read during query time.
+| Case | `source_path` | `retrieval_path` |
+| --- | --- | --- |
+| plain markdown | original markdown file | same file |
+| DOCX | original `.docx` file | derived markdown |
+| standard PDF | original `.pdf` file | same file |
+| image-enriched PDF | original `.pdf` file | enriched markdown |
 
-That indirection is why image-enriched PDFs and DOCX conversion work without changing the rest of the retrieval stack.
+At query time, the fetcher reads from `retrieval_path`, not necessarily from the original source.
 
-## Local Image Storage
+That is how the rest of the retrieval stack stays simple even though the ingestion path may have transformed the document first.
 
-The local store now includes an image directory for extracted PDF images.
+## Portable Path Semantics
 
-Those helpers are implemented in `storage/store.py`:
+The local store tries to persist paths relative to the base `data/` directory when possible.
 
-- `save_image()`
-- `load_image()`
-- `list_images()`
+That means:
 
-They are used by the image-aware ingestion branch to persist extracted images and later support UI rendering.
+- if a stored path lives under the `data/` tree, it can be stored portably
+- if it lives outside the `data/` tree, it is kept as an absolute path
 
-## Abstract Interface Gap
+This makes the local data directory more portable when copied between machines.
 
-`storage/base.py` still defines an abstract interface for:
+## Per-Document Trees
 
-- trees
-- source paths
-- derived markdown
-- deletion
-
-It does not yet define abstract image storage methods.
-
-That means the new image-enriched ingestion path is not fully backend-abstracted today.
-
-## MongoDB Backend
-
-`storage/factory.py` can switch the document store with:
+Each ingested document tree is stored as:
 
 ```text
-STORAGE_BACKEND=mongodb
+doc_trees/{doc_id}_tree.json
 ```
 
-The Mongo document store mirrors the core tree/source/derived-markdown responsibilities, but the new local image helpers are not part of the abstract base and are not documented as mirrored in Mongo.
+This is the canonical persisted PageIndex tree used by:
 
-Practically, that means:
+- document inspection
+- hybrid navigation
+- PageIndex agentic tool calls
+- experiments PageIndex builds
 
-- standard ingestion/query storage is backend-switchable
-- image-aware PDF ingestion is currently local-store-oriented
+## Derived Markdown
 
-## Index Metadata
+Derived markdown is stored under:
 
-`index_meta.json` stores lightweight runtime metadata about the active project scope:
+```text
+derived_markdown/{doc_id}.md
+```
 
-- project
-- index key
-- last used provider
-- last used model
-- index directory
+It can come from:
 
-This file is informational. It does not change index routing behavior, which is still project-driven.
+- DOCX conversion
+- PDF image enrichment
 
-## Project Deletion
+It is a first-class retrieval artifact, not just a debugging convenience.
 
-Deleting a project removes the entire artifact namespace for that project.
+## Image Storage
 
-Local backend behavior:
+When image-aware PDF ingestion runs, extracted images are stored under:
 
-- remove `data/indexes/{project}/`
+```text
+images/{doc_id}/{img_id}.{ext}
+```
 
-Mongo backend behavior:
-
-- delete project-scoped documents across the relevant collections
-
-The model registry is not project-scoped and is not deleted with a project.
-
-Important current-state note:
-
-- the current `delete_project()` implementation removes index artifacts, not traces
-- local trace files under `data/traces/{project}/` are stored separately and are not deleted by that code path today
-- the Mongo delete path likewise targets document and master-tree collections, not trace records
+These files are referenced indirectly by the enriched markdown’s `IMAGE_REF` blocks and then surfaced again later when the main Streamlit app renders answers with retrieved images.
 
 ## Trace Storage
 
-Audit traces are stored separately from the document index because they represent query executions, not source knowledge.
-
-Local trace filenames are timestamp-prefixed so simple reverse sort gives newest-first ordering:
+Audit traces are stored separately from the knowledge index:
 
 ```text
 data/traces/{project}/{YYYYMMDDTHHMMSS}_{trace_id}.json
 ```
 
-That format is used by trace listing, stats, and export functions.
+The timestamp prefix is deliberate. It lets the store list files in reverse lexical order and get “newest first” behavior without a separate index.
 
-## Practical Consequences
+## Experiments Artifact Layout
 
-- The storage layer preserves the distinction between original source files and retrieval-time text.
-- Project isolation is a physical storage boundary, not just a filter in memory.
-- The local store is the most complete backend today because it already includes the new image artifact helpers.
-- If you add a new ingestion artifact type, the storage abstraction likely needs to be updated in parallel or backend support will drift.
+The experiments harness does not write into `data/indexes/`.
+
+Instead it uses:
+
+```text
+experiments/artifacts/
+  corpora/
+  builds/
+  runs/
+  reports/
+  evals/
+```
+
+That directory is resolved by `experiments/layout.py`.
+
+### Why this separation matters
+
+It prevents:
+
+- experiment builds from polluting the live app index
+- experiment reports from mixing with operational traces
+- golden datasets from being confused with live project knowledge
+
+## Mongo Backend
+
+The repo can switch core storage through:
+
+```text
+STORAGE_BACKEND=mongodb
+```
+
+When that happens, the factories return Mongo-backed implementations for:
+
+- document storage
+- master-tree storage
+- trace storage
+
+### Important current-state gap
+
+The local `DocumentStore` now includes image helpers such as:
+
+- `save_image()`
+- `load_image()`
+- `list_images()`
+
+Those helpers are not defined on the abstract base interface. That means the newest image-aware ingestion path is not fully backend-neutral today.
+
+The practical consequence is:
+
+- standard tree/master/source storage is backend-switchable
+- image-aware PDF ingestion is currently local-store-oriented
+
+## Project Deletion Semantics
+
+Project deletion is easy to misunderstand because “project” spans more than one directory tree.
+
+### What `delete_project()` currently removes
+
+For the local backend, it removes:
+
+```text
+data/indexes/{project}/
+```
+
+For Mongo, it removes project-scoped document/master-tree records.
+
+### What it does not remove
+
+It does not remove:
+
+- `data/traces/{project}/`
+- global `data/model_registry.json`
+
+This is a real mismatch with some interface copy, especially in the React Inspect page, which currently describes project deletion as also removing traces.
+
+## Flow Guide
+
+### Flow: query-time fetch of one node
+
+1. query pipeline has a `doc_id::node_id`
+2. store loads the tree JSON
+3. store resolves the retrieval path from `doc_sources.json`
+4. fetcher reads the retrieval-time source
+
+### Flow: inspect a document tree
+
+1. caller chooses `doc_id`
+2. store loads `doc_trees/{doc_id}_tree.json`
+3. UI renders tree JSON or an outline view
+
+### Flow: ingest a transformed document
+
+1. ingestion writes derived markdown or enriched markdown
+2. store registers the original source path
+3. store also registers the derived retrieval path
+4. query-time fetch transparently uses the derived form
+
+### Flow: delete a document
+
+1. remove master-tree node
+2. remove tree JSON
+3. deregister source path
+4. remove derived markdown if present
+
+Image files are not currently covered by the documented per-document delete helper path, so that cleanup story is less complete than the main tree/source/delete path.
+
+## What Is Possible In This Module
+
+This module currently supports:
+
+- project-scoped local knowledge persistence
+- project-scoped local trace persistence
+- source-vs-retrieval path indirection
+- derived markdown storage
+- image artifact storage for image-aware ingestion
+- Mongo-backed alternatives for the core store families
+- fully isolated experiments artifact storage
+
+## Current Constraints
+
+- Image helpers are not fully abstracted across backends.
+- Project deletion does not currently clear trace files.
+- Different interfaces sometimes imply broader deletion semantics than the actual backend implementation performs.
+- Experiments and main-runtime artifacts intentionally live in different storage worlds, so “where is this tree?” depends on whether the document came from the live app or an experiment build.

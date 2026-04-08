@@ -6,146 +6,229 @@ Primary code:
 - `utils.py`
 - `model_registry.py`
 - `api/runtime.py`
+- `storage/factory.py`
+- `master_tree/factory.py`
+- `traces/factory.py`
 - `.env.example`
 - `config.yaml`
 
 ## Purpose
 
-The runtime foundation decides which index is active, which model/provider configuration is active, which storage backend to use, and how shared LLM helpers behave.
+The runtime foundation is the assembly layer for the whole application. It decides:
 
-This layer is important because most of the application behavior is environment-driven rather than config-file-driven.
+- which project namespace is active
+- which model/provider configuration is active
+- which storage backend objects to instantiate
+- which shared LLM helpers every subsystem should use
+- how legacy directories, provider quirks, and runtime defaults are normalized
 
-## Runtime Assembly
+If ingestion and retrieval are the data plane, this module is the control plane that decides which data plane instance you are talking to.
 
-`index_registry.build_runtime_components()` is the canonical runtime builder for the main app, CLI, and FastAPI adapter.
+## Core Mental Model
 
-It resolves:
+There are two independent selectors in the runtime:
 
-- the logical project name
-- the active model
-- the provider
-- the on-disk index directory
-- the master tree store
-- the document store
-- the trace store and `TraceService`
+- `project`
+- `model`
 
-The resulting bundle is a `RuntimeComponents` object:
+They are intentionally not symmetrical.
+
+| Selector | What it changes | What it does not change |
+| --- | --- | --- |
+| `project` | active index directory, visible documents, project-scoped traces | model/provider behavior |
+| `model` | LLM calls, reasoning effort support, token accounting behavior | active document set |
+
+This is the single most important runtime rule in the repo.
+
+## Runtime Assembly Flow
+
+The canonical builder is `index_registry.build_runtime_components()`.
+
+It performs these steps:
+
+1. Resolve the active project key and runtime paths with `resolve_index_context()`.
+2. Ensure the project index directory and uploads directory exist.
+3. Persist `index_meta.json` for the active project.
+4. Create the master-tree store.
+5. Create the document store.
+6. Create the trace store.
+7. Wrap the trace store in `TraceService`.
+8. Return a `RuntimeComponents` bundle.
+
+The resulting bundle is what the main Streamlit app, CLI, and FastAPI adapter all consume.
+
+## `IndexContext`
+
+`IndexContext` is the resolved filesystem identity of one active project.
+
+It contains:
+
+- provider
+- model
+- project
+- index key
+- base data dir
+- index dir
+- master tree path
+- metadata path
+- uploads dir
+
+The important subtlety is that `index_dir` is derived from `project`, not from `model`.
+
+## `RuntimeComponents`
+
+`RuntimeComponents` bundles the objects the rest of the application needs:
 
 - `index_context`
 - `master_tree_store`
 - `storage`
 - `trace_service`
 
-## Project Scoping
+This object is intentionally framework-neutral. The CLI, Streamlit UI, and API adapter all build the same bundle rather than each constructing their own stores independently.
 
-The central rule is:
+## Project Resolution
 
-- project changes the document universe
-- model does not
+### Canonical naming
 
-`index_registry.resolve_index_context()` always maps the active runtime to:
+`sanitize_index_key_part()` collapses free-form names into filesystem-safe keys. That same normalization is used across:
+
+- project directories
+- corpus IDs
+- suite IDs
+- generated document IDs in some flows
+
+### Alias handling
+
+The project resolver does more than simple slugification. It also handles legacy alias directories.
+
+Example problem:
+
+- an older run may have written `my__project`
+- a newer run may resolve the same logical name as `my_project`
+
+`resolve_project_key()` groups directory names that normalize to the same key, then prefers the alias directory that looks most populated and most explicitly associated with the requested project.
+
+This prevents duplicate logical projects from appearing in the UI when historical directory naming drift exists on disk.
+
+### Default project
+
+When nothing is specified, the runtime falls back to:
 
 ```text
-data/indexes/{project}/
+default
 ```
 
-The model is recorded into `index_meta.json`, but it is not part of the directory name.
-
-### Alias resolution
-
-`index_registry.py` also handles legacy or inconsistent project directory names by:
-
-- normalizing names with `sanitize_index_key_part()`
-- grouping alias directories that normalize to the same key
-- preferring the alias directory that appears most populated
-
-That logic prevents duplicate logical projects in the UI when old directories exist.
+That default is stable across the CLI, Streamlit app, API adapter, and React frontend.
 
 ## Model Registry
 
-`model_registry.py` stores a lightweight list of user-visible model or deployment names in:
+`model_registry.py` stores user-visible model or deployment names in:
 
 ```text
 data/model_registry.json
 ```
 
-The registry is used by the FastAPI adapter and UIs to populate model selectors.
+This registry is intentionally simple.
 
-It does not provision models. It only stores names.
+It does:
 
-## Provider Detection And LLM Config
+- persist names
+- populate dropdowns
+- ensure a requested model exists in the registry
 
-`utils.py` is the shared LLM compatibility layer.
+It does not:
 
-It handles:
+- deploy a model
+- validate that the remote provider really serves that model
+- create provider credentials
+
+The model registry is a UI/runtime convenience layer, not a provisioning system.
+
+## Provider Detection And Client Setup
+
+`utils.py` is the shared LLM compatibility layer used by ingestion, retrieval, experiments, and traces.
+
+It owns:
 
 - provider detection
 - default model resolution
-- sync and async OpenAI-compatible client creation
-- Azure OpenAI v1 base URL derivation
-- request compatibility fallbacks for unsupported parameters
+- sync and async client creation
+- Azure/OpenAI-compatible URL normalization
+- request fallbacks when a parameter is unsupported
 - reasoning-effort normalization
-- token estimation and usage tracking
+- token usage tracking
 - PageIndex compatibility patching
 
-### Provider selection
+### Provider detection
 
 Provider resolution is effectively:
 
-1. Use `LLM_PROVIDER` if explicitly set.
-2. Otherwise infer Azure when Azure endpoint/key settings are present.
-3. Otherwise use the OpenAI-compatible path.
+1. use `LLM_PROVIDER` when present
+2. otherwise infer Azure if Azure credentials/endpoints are present
+3. otherwise fall back to the OpenAI-compatible path
 
 ### Default model resolution
 
-`utils.get_default_model()` resolves in this order:
+The default model is resolved in priority order from environment state, not from `config.yaml`.
 
-- `LLM_MODEL`
-- Azure deployment name from `AZURE_OPENAI_CHAT_DEPLOYMENT`
-- `OPENAI_MODEL`
-- fallback default
+Typical precedence:
 
-## Environment Variables
+1. `LLM_MODEL`
+2. Azure deployment name
+3. `OPENAI_MODEL`
+4. built-in fallback
 
-The following variables are actively read by application code.
+### Compatibility fallbacks
 
-### Core LLM/provider settings
+The helper layer intentionally strips unsupported parameters and retries when needed.
+
+Examples:
+
+- remove `temperature` for models that do not support explicit temperature
+- remove `reasoning_effort` when the provider rejects it
+- estimate usage when the response omits token counts
+
+This matters because the same code path may be used with GPT, Azure-hosted deployments, or other OpenAI-compatible endpoints.
+
+## Environment Variables That Matter
+
+### Core provider and model settings
 
 | Variable | Purpose |
 | --- | --- |
-| `LLM_PROVIDER` | Explicit provider override |
-| `LLM_MODEL` | Preferred default model/deployment |
+| `LLM_PROVIDER` | explicit provider override |
+| `LLM_MODEL` | preferred default model/deployment |
 | `OPENAI_API_KEY` | OpenAI key |
 | `OPENAI_MODEL` | OpenAI default model |
-| `OPENAI_BASE_URL` | Alternate OpenAI-compatible base URL |
-| `AZURE_OPENAI_API_KEY` | Azure OpenAI key |
+| `OPENAI_BASE_URL` | custom OpenAI-compatible endpoint |
+| `AZURE_OPENAI_API_KEY` | Azure key |
 | `AZURE_OPENAI_ENDPOINT` | Azure endpoint |
-| `AZURE_OPENAI_BASE_URL` | Explicit Azure v1 base URL |
+| `AZURE_OPENAI_BASE_URL` | explicit Azure v1 base URL |
 | `AZURE_OPENAI_CHAT_DEPLOYMENT` | Azure deployment name |
-| `CHATGPT_API_KEY` | Backfilled for PageIndex compatibility |
+| `CHATGPT_API_KEY` | compatibility backfill for PageIndex |
 
-### Runtime behavior
+### Query-time behavior
 
 | Variable | Purpose |
 | --- | --- |
-| `DOMAIN_NAME` | Domain-specific wording injected into answer prompts |
-| `RETRIEVAL_MODE` | Default query mode: `hybrid` or `pageindex` |
-| `NAVIGATOR_VERIFICATION` | Enable verifier pass |
-| `ADVANCED_RETRIEVAL` | Master switch for advanced retrieval |
-| `QUERY_PLANNING` | Enable planner when advanced retrieval is active |
-| `ADAPTIVE_RETRIEVAL_WIDTH` | Allow planner-driven width changes |
-| `NODE_EXPANSION` | Allow structural neighbor expansion |
-| `MAX_DOCS_CAP` | Hard ceiling for advanced doc routing |
-| `MAX_NODES_CAP` | Hard ceiling for advanced node selection |
+| `RETRIEVAL_MODE` | default query mode |
+| `NAVIGATOR_VERIFICATION` | enable verifier pass |
+| `ADVANCED_RETRIEVAL` | master switch for advanced retrieval |
+| `QUERY_PLANNING` | enable planner when advanced retrieval is on |
+| `ADAPTIVE_RETRIEVAL_WIDTH` | enable planner-driven width changes |
+| `NODE_EXPANSION` | enable structural neighbor expansion |
+| `MAX_DOCS_CAP` | hard cap for advanced doc routing |
+| `MAX_NODES_CAP` | hard cap for advanced node selection |
+| `DOMAIN_NAME` | domain-specific answer wording context |
 
 ### Ingestion behavior
 
 | Variable | Purpose |
 | --- | --- |
-| `MASTER_TOP_SECTIONS_TARGET` | Target number of top sections stored in master nodes |
-| `RELATED_DOCS_MODE` | Default relationship maintenance mode: `off`, `basic`, or `enhanced` |
+| `MASTER_TOP_SECTIONS_TARGET` | target number of stored top sections in master nodes |
+| `RELATED_DOCS_MODE` | default relationship maintenance mode |
 
-### Persistence backend
+### Persistence
 
 | Variable | Purpose |
 | --- | --- |
@@ -153,60 +236,88 @@ The following variables are actively read by application code.
 | `MONGODB_URI` | Mongo connection string |
 | `MONGODB_DATABASE` | Mongo database name |
 
-## `config.yaml` vs runtime behavior
+## Factories And Backend Selection
 
-`config.yaml` is documentation only.
+The runtime does not instantiate stores directly in most interfaces. It goes through factories:
 
-No production code loads `config.yaml` as an active config source. Actual runtime settings come from environment variables and explicit call parameters.
+- `storage.factory.create_document_store()`
+- `master_tree.factory.create_master_tree_store()`
+- `traces.factory.create_trace_store()`
 
-That file is still useful as a human-readable config reference, but it is not authoritative by itself.
+This allows the runtime to switch between local JSON/file storage and Mongo-backed implementations for the core stores.
 
-## Shared Constants And Defaults
+### Important current nuance
 
-Selected shared defaults from `utils.py`:
+The image-aware PDF ingestion path uses image helpers defined only on the local `DocumentStore`. That means the storage abstraction is not fully complete for the newest image branch even though the core tree/source/master-tree path is backend-switchable.
 
-- `INGESTION_REASONING_EFFORT = "high"`
-- reasoning effort options: `minimal`, `low`, `medium`, `high`
-- `MASTER_TOP_SECTIONS_DEFAULT = 4`
-- `ADVANCED_RETRIEVAL_MAX_DOCS_CAP = 6`
-- `ADVANCED_RETRIEVAL_MAX_NODES_CAP = 6`
-- `RELATED_DOCS_MODE_DEFAULT = "basic"`
-- retrieval modes: `hybrid`, `pageindex`
+## `config.yaml` Is Not Live Runtime Configuration
 
-## Request Compatibility Layer
+This is easy to misunderstand.
 
-`utils.create_chat_completion()` and `utils.create_chat_completion_async()` protect the runtime against model/provider incompatibilities by retrying without unsupported arguments such as:
+`config.yaml` is documentation/reference material. Production code does not load it as the source of truth for runtime settings. The live sources of truth are:
 
-- `temperature`
-- `reasoning_effort`
-- `stream_options`
+- explicit function arguments
+- environment variables
+- persisted runtime metadata files such as `index_meta.json`
 
-That layer matters because the repo tries to support both OpenAI and Azure OpenAI with one call path.
+## Flow Guide
 
-## PageIndex Compatibility Boundary
+### Flow: boot a runtime
 
-PageIndex still expects older OpenAI-style environment conventions.
+1. Choose or receive a `project`.
+2. Choose or infer a `model`.
+3. Resolve the canonical project key.
+4. Build stores for that project.
+5. Return `RuntimeComponents`.
 
-`utils.ensure_pageindex_environment()` fills the required environment variables before the vendor code is called by:
+This is what every interface does, even if the UI hides some of those steps.
 
-- copying the resolved runtime API key into `CHATGPT_API_KEY` and `OPENAI_API_KEY`
-- setting `OPENAI_BASE_URL` when needed
+### Flow: switch projects
 
-`ingestion/ingest.py` then patches selected PageIndex helper functions so the vendor code uses the repo's client/runtime behavior instead of bypassing it.
+1. Resolve the new project key.
+2. Rebuild runtime components against `data/indexes/{project}/`.
+3. The document universe changes.
+4. The model can remain the same.
 
-## Upload Persistence
+### Flow: switch models
 
-The FastAPI adapter uses `api/runtime.py` to persist uploads into:
+1. Keep the same project key.
+2. Rebuild runtime components with a different `model`.
+3. The visible documents stay the same.
+4. Only LLM behavior changes.
 
-```text
-data/uploads/{doc_id}_{random8}.{ext}
-```
+### Flow: delete a project
 
-Uploads are shared across projects. The project namespace applies to index artifacts, not raw uploaded files.
+1. Resolve project aliases.
+2. Remove the project’s index namespace.
+3. Do not recreate directories while deleting.
 
-## Operational Implications
+Important nuance:
 
-- Reusing the same project with a different model will keep the same indexed documents visible.
-- Changing `STORAGE_BACKEND` changes the store implementation behind the same runtime builder.
-- Image-aware PDF ingestion is currently not backend-neutral because the new image helpers are implemented only on the local store path.
-- If a behavior appears inconsistent between interfaces, check whether the interface is passing an explicit override or relying on env defaults.
+- local project deletion removes `data/indexes/{project}/`
+- it does not remove `data/traces/{project}/`
+
+That is a real code-level mismatch with some interface copy.
+
+## What Is Possible In This Module
+
+This layer supports:
+
+- project-scoped knowledge isolation
+- model-agnostic knowledge visibility
+- provider selection at runtime
+- local or Mongo-backed core storage
+- transparent alias cleanup for historical project directories
+
+This layer does not support:
+
+- model deployment or provisioning
+- remote provider validation during model registration
+- full backend parity for the newest image-ingestion helpers
+
+## Current Constraints And Gotchas
+
+- `delete_project()` does not delete traces, even though some UI text implies that it does.
+- Image-aware ingestion currently assumes local image persistence helpers.
+- `config.yaml` is descriptive, not authoritative.
+- If you are debugging why “the wrong docs” appear after a model switch, the bug is almost never model-related. It is almost always project resolution or stale artifacts.

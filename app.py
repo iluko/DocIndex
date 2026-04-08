@@ -283,6 +283,64 @@ def render_styles() -> None:
                 color: #18181b !important;
             }
 
+            /* ── Chat messages (main) ───────────────────────────────────── */
+            .stMain [data-testid="stChatMessage"] {
+                background: transparent !important;
+                color: #18181b !important;
+            }
+            .stMain [data-testid="stChatMessage"] p,
+            .stMain [data-testid="stChatMessage"] li,
+            .stMain [data-testid="stChatMessage"] span,
+            .stMain [data-testid="stChatMessage"] code,
+            .stMain [data-testid="stChatMessage"] .stMarkdown {
+                color: #18181b !important;
+            }
+
+            /* ── Checkbox (main) ─────────────────────────────────────────── */
+            .stMain .stCheckbox label,
+            .stMain .stCheckbox label p,
+            .stMain .stCheckbox label span {
+                color: #3f3f46 !important;
+            }
+            /* Disabled checkbox keeps label readable */
+            .stMain .stCheckbox [aria-disabled="true"] label,
+            .stMain .stCheckbox [aria-disabled="true"] label p,
+            .stMain .stCheckbox [aria-disabled="true"] label span {
+                color: #a1a1aa !important;
+            }
+
+            /* ── Multiselect (main) ──────────────────────────────────────── */
+            .stMain [data-testid="stMultiSelect"] [data-baseweb="select"] > div {
+                background: #ffffff !important;
+                border: 1px solid #e4e4e7 !important;
+                color: #18181b !important;
+            }
+            .stMain [data-testid="stMultiSelect"] span,
+            .stMain [data-testid="stMultiSelect"] [data-testid="stMultiSelectTag"] {
+                color: #18181b !important;
+                background: #f4f4f5 !important;
+            }
+
+            /* ── Select/multiselect dropdown popover ─────────────────────── */
+            [data-baseweb="popover"] li,
+            [data-baseweb="popover"] [role="option"],
+            [data-baseweb="menu"] li {
+                color: #18181b !important;
+                background: #ffffff !important;
+            }
+            [data-baseweb="popover"] li:hover,
+            [data-baseweb="menu"] li:hover {
+                background: #f4f4f5 !important;
+            }
+
+            /* ── Alert / info / warning / success boxes ──────────────────── */
+            .stMain [data-testid="stAlert"] p,
+            .stMain [data-testid="stAlert"] span,
+            .stMain [data-testid="stNotification"] p,
+            .stMain [data-testid="stNotification"] span {
+                color: #18181b !important;
+            }
+
             /* ── Tabs ────────────────────────────────────────────────────── */
             button[data-baseweb="tab"] {
                 color: #71717a !important;
@@ -398,6 +456,50 @@ def render_styles() -> None:
             [data-testid="stSidebar"] .stSlider [data-testid="stTickBarMin"],
             [data-testid="stSidebar"] .stSlider [data-testid="stTickBarMax"] {
                 color: #71717a !important;
+            }
+
+            /* ── st.code blocks (main area) — force light theme ─────────────
+               Streamlit ships code blocks with a dark background regardless of
+               the app theme.  Override the pre/code wrapper and the syntax
+               highlight tokens so they stay readable on the light canvas.    */
+            .stMain [data-testid="stCode"],
+            .stMain [data-testid="stCode"] pre,
+            .stMain [data-testid="stCode"] code,
+            .stMain .stCode pre,
+            .stMain .stCode code {
+                background: #f4f4f5 !important;
+                color: #18181b !important;
+                border: 1px solid #e4e4e7 !important;
+                border-radius: 6px !important;
+            }
+            /* Syntax highlight token colours — keep them readable on light bg */
+            .stMain [data-testid="stCode"] .token.string,
+            .stMain [data-testid="stCode"] .token.attr-value   { color: #166534 !important; }
+            .stMain [data-testid="stCode"] .token.keyword,
+            .stMain [data-testid="stCode"] .token.operator     { color: #7c3aed !important; }
+            .stMain [data-testid="stCode"] .token.number,
+            .stMain [data-testid="stCode"] .token.boolean      { color: #b45309 !important; }
+            .stMain [data-testid="stCode"] .token.comment      { color: #6b7280 !important; }
+            .stMain [data-testid="stCode"] .token.property,
+            .stMain [data-testid="stCode"] .token.attr-name    { color: #1d4ed8 !important; }
+            /* Copy button on code blocks */
+            .stMain [data-testid="stCode"] button {
+                background: #e4e4e7 !important;
+                color: #18181b !important;
+                border: 1px solid #d4d4d8 !important;
+            }
+            .stMain [data-testid="stCode"] button:hover {
+                background: #d4d4d8 !important;
+            }
+            /* Inline code spans in markdown */
+            .stMain .stMarkdown code,
+            .stMain .stText code {
+                background: #f4f4f5 !important;
+                color: #18181b !important;
+                border: 1px solid #e4e4e7 !important;
+                border-radius: 3px !important;
+                padding: 1px 5px !important;
+                font-size: 0.875em !important;
             }
         </style>
         """,
